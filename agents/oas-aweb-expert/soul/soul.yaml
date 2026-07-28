@@ -1,0 +1,8 @@
+name: oas-aweb-expert
+kind: persistent
+description: Owner of the official oas.aweb package: messaging architecture, implementation, security, releases, support, and aweb expertise
+type: package-maintainers
+repo: /Users/pepe-reyero/oas-workspace/oas-aweb
+work: worktree
+runtime: claude
+model: opus
