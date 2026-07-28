@@ -1,0 +1,11 @@
+{
+  "package": "oas.aweb",
+  "version": "1.8.0",
+  "description": "Official OAS messaging integration for team-scoped aweb identities, mail, chat, and roster discovery.",
+  "compatibility": {
+    "oas": ">=0.19.0"
+  },
+  "capabilities": [
+    "capabilities/oas-aweb"
+  ]
+}

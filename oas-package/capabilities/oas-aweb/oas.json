@@ -1,0 +1,47 @@
+{
+  "capability": "oas.aweb",
+  "command": "aweb",
+  "version": "1.8.0",
+  "compatibility": {
+    "oas": ">=0.19.0"
+  },
+  "layer": "messaging",
+  "description": "Messaging layer via aweb: per-instance team identities + native aw mail/chat skills + cross-machine team roster.",
+  "requires": [
+    {
+      "command": "aw",
+      "why": "identity minting at spawn, self-delete at retire, and all agent messaging",
+      "install": "https://aweb.ai/docs (aw CLI)"
+    },
+    {
+      "runtime": "pi",
+      "package": "npm:@awebai/pi",
+      "why": "the aweb channel extension for pi sessions — real-time mail/chat awakenings; without it a pi instance can send with `aw` but is never woken by incoming messages",
+      "install": "https://aweb.ai/docs (installed into pi with `pi install npm:@awebai/pi`)"
+    },
+    {
+      "runtime": "claude",
+      "package": "aweb-channel@awebai-marketplace",
+      "marketplace": "awebai/claude-plugins",
+      "why": "the aweb channel plugin for Claude Code sessions — real-time mail/chat awakenings; without it a Claude instance can send with `aw` but is never woken by incoming messages",
+      "install": "https://aweb.ai/docs (installs the awebai marketplace and the aweb-channel plugin into Claude Code)"
+    }
+  ],
+  "skills": [
+    "skills/aweb-messaging",
+    "skills/aweb-team-membership",
+    "skills/aweb-identity"
+  ],
+  "inject": "injects/aweb.md",
+  "commands": {
+    "roster": "bin/oas-aweb.mjs roster",
+    "setup": "bin/oas-aweb.mjs setup"
+  },
+  "hooks": {
+    "spawn": {
+      "command": "bin/oas-aweb.mjs spawn",
+      "required": true
+    },
+    "retire": "bin/oas-aweb.mjs retire"
+  }
+}
