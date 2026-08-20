@@ -476,3 +476,51 @@ test("validator accepts a skill that is a single file", (t) => {
   });
   assert.equal(result.status, 0, `a single-file skill is legal and must not be rejected: ${result.stderr}`);
 });
+
+// The embedded scan reuses nonPortableValue via tokenization rather than a
+// second set of patterns. These are the forms a parallel definition got wrong:
+// path forms needing no trailing character, and embedding contexts a
+// hand-maintained boundary list did not list.
+for (const [label, value] of [
+  ["a bare tilde-user with no trailing slash", "launch --home=~alice"],
+  ["a bare tilde", "launch --home=~"],
+  ["a bare filesystem root", "cd /"],
+  ["a bare backslash root", "use \\"],
+  ["a bracket-delimited path", "launch paths=[/etc/oas/private.yaml]"],
+  ["a brace-delimited path after a colon", "launch {config:/tmp/private.yaml}"],
+  ["a path after a non-drive colon", "launch config:/tmp/private.yaml"],
+]) {
+  test(`validator rejects ${label}`, (t) => {
+    const result = runFixture(t, {
+      manifestExtras: { configTemplates: { default: { path: "config-templates/default/oas-config.yaml" } } },
+      files: { "config-templates/default/oas-config.yaml": `${PORTABLE_TEMPLATE}agents-md-injection: "${value}"\n` },
+    });
+    assert.equal(result.status, 1, `${label} must not reach an adopter`);
+    assert.match(result.stderr, /not portable/);
+  });
+}
+
+for (const [label, value] of [
+  // A colon does not imply a path: a provider team id and an scp-style remote
+  // both carry one, and a drive letter NEEDS its colon kept intact.
+  ["a provider team id", "default:oas-framework.aweb.ai"],
+  ["prose containing a slash", "read and/or write"],
+]) {
+  test(`validator accepts ${label}`, (t) => {
+    const result = runFixture(t, {
+      manifestExtras: { configTemplates: { default: { path: "config-templates/default/oas-config.yaml" } } },
+      files: { "config-templates/default/oas-config.yaml": `${PORTABLE_TEMPLATE}agents-md-injection: "${value}"\n` },
+    });
+    assert.equal(result.status, 0, `${label} is portable: ${result.stderr}`);
+  });
+}
+
+test("a deployment-local team id remains a legal config value", (t) => {
+  // team.id is exactly the kind of value that carries a colon, and the template
+  // documentation tells adopters they may add one.
+  const result = runFixture(t, {
+    manifestExtras: { configTemplates: { default: { path: "config-templates/default/oas-config.yaml" } } },
+    files: { "config-templates/default/oas-config.yaml": "name: fixture-deployment\nteam:\n  name: my-team\n  id: default:oas-framework.aweb.ai\n" },
+  });
+  assert.equal(result.status, 0, result.stderr);
+});

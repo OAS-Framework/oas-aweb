@@ -173,30 +173,48 @@ function withoutPortableUrls(text) {
   return String(text).replace(URL_SPAN, (span) => (/^file:/i.test(span) ? span : " ".repeat(span.length)));
 }
 
-/** Local-path forms as they appear EMBEDDED in a larger string (after a space,
- * quote, bracket, `=` or separator). Every class nonPortableValue recognises at
- * the start of a scalar has an entry here, because an argument string is just
- * as identifying as a bare value — and reusing the deliberately narrow comment
- * markers instead let `--config=/etc/oas/private.yaml` through. */
-const PATH_BOUNDARY = `(?:^|[\\s"'(=,;])`;
-const EMBEDDED_LOCAL_PATH = [
-  [new RegExp(`${PATH_BOUNDARY}file:(?://|/|[A-Za-z]:)`, "i"), "a file: URI"],
-  [new RegExp(`${PATH_BOUNDARY}~(?:[/\\\\]|[A-Za-z0-9_.-]+[/\\\\])`), "a home-relative (~) path"],
-  [new RegExp(`${PATH_BOUNDARY}[A-Za-z]:[\\\\/]`), "a Windows drive-letter path"],
-  [new RegExp(`${PATH_BOUNDARY}\\\\\\\\[^\\\\\\s]`), "a Windows UNC network path"],
-  [new RegExp(`${PATH_BOUNDARY}\\\\[^\\\\\\s]`), "a Windows root-relative path"],
-  [new RegExp(`${PATH_BOUNDARY}/[^\\s]`), "an absolute machine path"],
-];
+/** Delimiters that can separate a path from surrounding text. `:` is NOT one —
+ * it belongs to a Windows drive letter — and `.` and `@` are not, so an
+ * scp-style git remote stays one token. */
+const TOKEN_SPLIT = /[\s"'`(){}\[\]<>,;|=&]+/;
 
-/** Why a local path embedded in this scalar cannot travel, or undefined. */
-function embeddedLocalPath(value) {
-  const text = withoutPortableUrls(value);
-  for (const [pattern, what] of EMBEDDED_LOCAL_PATH) if (pattern.test(text)) return what;
+/** Why a local path appearing ANYWHERE in this scalar cannot travel.
+ *
+ * Deliberately no second set of "embedded" patterns: maintaining path forms
+ * twice is how the two drift, and they did — the embedded matchers required a
+ * trailing slash and a boundary character, so `--home=~alice`, `--home=~`,
+ * `cd /`, `use \` and `paths=[/etc/oas/x]` all passed while the very same
+ * strings were rejected as whole values. Instead the text is split into tokens
+ * and each is handed to nonPortableValue, so there is exactly ONE definition of
+ * every path form and a new embedding context cannot silently escape it. */
+function localPathIn(value) {
+  for (const token of withoutPortableUrls(value).split(TOKEN_SPLIT)) {
+    if (!token) continue;
+    for (const candidate of pathCandidates(token)) {
+      const reason = nonPortableValue(candidate);
+      if (reason) return reason;
+    }
+  }
   return undefined;
 }
 
+/** A token, plus what follows each of its colons. `key:/tmp/x` embeds a path
+ * that no whitespace delimiter separates, so the colon has to be considered —
+ * but it cannot simply be a TOKEN_SPLIT delimiter, because a Windows drive
+ * letter needs its colon. A single-character prefix is therefore a drive and is
+ * left alone, and `file:` is a scheme nonPortableValue already classifies. A
+ * provider team id like `default:oas-framework.aweb.ai` yields a clean tail and
+ * stays legal. */
+function* pathCandidates(token) {
+  yield token;
+  for (let i = token.indexOf(":"); i !== -1; i = token.indexOf(":", i + 1)) {
+    const prefix = token.slice(0, i);
+    if (prefix.length > 1 && !/^file$/i.test(prefix)) yield token.slice(i + 1);
+  }
+}
+
 /** Markers that identify a PERSON or MACHINE. Applied ONLY to comment text:
- * scalars get the stricter EMBEDDED_LOCAL_PATH scan above, and running these
+ * scalars get the stricter token scan in localPathIn above, and running these
  * over the whole file would override its URL handling — the portable value
  * https://docs.example.test/home/getting-started would be rejected as a user
  * home directory. Comments stay deliberately narrow because they are PROSE: an
@@ -233,13 +251,13 @@ function checkPortability(node, at, path = []) {
     report(at, `config template is not portable — "${where}" is ${reason} (${JSON.stringify(node)}); templates are adopted verbatim into other people's deployments`);
   } else if (typeof node === "string") {
     // nonPortableValue only classifies a value that IS a path. One EMBEDDED in a
-    // larger scalar identifies its author just as well, so the remainder of the
-    // string — after complete non-file URL spans are removed — is scanned for
-    // every local-path class. Removing URLs by SPAN rather than exempting the
-    // whole scalar is what makes
+    // larger scalar identifies its author just as well, so the string is
+    // tokenized — after complete non-file URL spans are removed — and every
+    // token is put through the SAME classifier. Removing URLs by SPAN rather
+    // than exempting the whole scalar is what makes
     //   "https://example.test/guide --config=/Users/alice/private.yaml"
     // fail while "open https://example.test/Users/guide" passes.
-    const embedded = embeddedLocalPath(node);
+    const embedded = localPathIn(node);
     if (embedded) {
       report(at, `config template is not portable — "${where}" embeds ${embedded} (${JSON.stringify(node)}); templates are adopted verbatim into other people's deployments`);
     }

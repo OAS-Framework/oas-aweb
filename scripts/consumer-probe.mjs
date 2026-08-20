@@ -72,13 +72,24 @@ mkdirSync(NODE_ONLY, { recursive: true });
 symlinkSync(process.execPath, join(NODE_ONLY, "node"));
 const BASE_PATH = `${NODE_ONLY}:/usr/bin:/bin`;
 
+/** Every stub records an unexpected invocation here; the probe fails at the end
+ * if the file exists. A stub that silently returns 0 for a call nobody planned
+ * cannot fail a run it was never supposed to take part in. */
+const UNEXPECTED = join(sandbox, "unexpected-invocations.log");
+
+/** A stub that handles the calls named in `body` and REFUSES everything else. */
 function shim(dir, name, body) {
   mkdirSync(dir, { recursive: true });
   const file = join(dir, name);
-  writeFileSync(file, `#!/bin/sh\n${body}\n`);
+  writeFileSync(file, `#!/bin/sh\n${body}\nprintf '%s: %s\\n' "${name}" "$*" >> ${UNEXPECTED}\nexit 90\n`);
   chmodSync(file, 0o755);
   return file;
 }
+
+/** Binaries the released kernel resolves that this probe must control rather
+ * than inherit: the runtime binaries (resolved even for a scaffold-only spawn),
+ * the aweb CLI, and tmux. */
+const CONTROLLED = ["aw", "pi", "claude", "tmux"];
 
 function oas(args, { cwd = sandbox, path = BASE_PATH, env = {}, expect = "ok" } = {}) {
   const run = spawnSync(process.execPath, [KERNEL, ...args], {
@@ -127,6 +138,20 @@ const TEMPLATE = readFileSync(join(SOURCE, PACKAGE_MANIFEST.configTemplates.defa
 console.log(`consumer probe — kernel ${oas(["version"]).stdout.trim()}\n  payload: ${PAYLOAD}\n  sandbox: ${sandbox}\n`);
 check(`kernel under test is the declared floor ${KERNEL_VERSION}`, () => {
   assert(oas(["version"]).stdout.includes(KERNEL_VERSION), `kernel is not ${KERNEL_VERSION}`);
+});
+
+check("the probe PATH controls every executable the kernel may resolve", () => {
+  // The absent DIRECTION must be a property of this construction, not of the
+  // machine. On a host shipping /usr/bin/pi the fails-closed checks below would
+  // otherwise exercise the real runtime and pass for the wrong reason — the
+  // same class of accident as `aw` living beside `node` in nvm layouts.
+  for (const bin of CONTROLLED) {
+    const found = spawnSync("sh", ["-c", `command -v ${bin}`], { env: { PATH: BASE_PATH }, encoding: "utf8" }).stdout.trim();
+    equal(found, "", `${bin} must not be reachable from the probe PATH (found ${found})`);
+  }
+  const node = spawnSync("sh", ["-c", "command -v node"], { env: { PATH: BASE_PATH }, encoding: "utf8" }).stdout.trim();
+  assert(node, "node must stay reachable");
+  equal(process.env.HOME === HOME, false, "HOME is replaced per invocation, not inherited");
 });
 
 // ======================================================= config-reader parity
@@ -465,7 +490,14 @@ const FAKE_BIN = join(sandbox, "fake-bin");
 const AW_STATE = join(sandbox, "aw-calls.log");
 const PI_EXT = join(sandbox, "pi-packages", "awebai-pi");
 mkdirSync(PI_EXT, { recursive: true });
-shim(FAKE_BIN, "pi", `if [ "$1" = "list" ]; then printf '  npm:@awebai/pi\\n      ${PI_EXT}\\n'; exit 0; fi\nexit 0`);
+shim(FAKE_BIN, "pi", `if [ "$1" = "list" ]; then printf '  npm:@awebai/pi\\n      ${PI_EXT}\\n'; exit 0; fi`);
+// tmux is CONTROLLED, not forbidden: retire legitimately closes the instance's
+// window. What --no-launch must never do is CREATE one, so the stub answers the
+// teardown calls and refuses everything else — a `new-session`, `new-window` or
+// `send-keys` fails the probe rather than silently starting a session.
+shim(FAKE_BIN, "tmux", `case "$1" in
+  kill-window|has-session|list-windows|list-sessions) exit 0 ;;
+esac`);
 shim(FAKE_BIN, "aw", `echo "$@" >> ${AW_STATE}
 case "$1 $2" in
   "team list") printf '{"active_team":"${TEAM}","memberships":[{"team_id":"${TEAM}"}]}\\n' ;;
@@ -473,7 +505,7 @@ case "$1 $2" in
   "team join") printf '{"alias":"%s","team_id":"${TEAM}"}\\n' "$5" ;;
   "init "*|"init") mkdir -p .aw ;;
   "workspace delete") : ;;
-  *) printf '{}\\n' ;;
+  *) exit 91 ;;
 esac
 exit 0`);
 const FAKE_PATH = `${FAKE_BIN}:${BASE_PATH}`;
@@ -496,6 +528,7 @@ check("spawn mints a team identity through the required hook", () => {
   const spawned = oasJson(["spawn", "probe-pi", "--purpose", "live", "--task", "probe", "--no-launch"], { cwd: adopted, path: FAKE_PATH });
   assert(spawned.ok, `spawn failed: ${JSON.stringify(spawned.error)}`);
   instanceHome = spawned.result.home || spawned.result.instanceHome || join(adopted, "local-agents", "probe-pi", "instances", "probe-pi-live");
+  equal(spawned.result.launched, false, "a --no-launch spawn must scaffold only");
   const instance = readJson(join(instanceHome, "instance.json"));
   const meta = JSON.stringify(instance);
   assert(meta.includes(TEAM), `the minted team must be recorded in instance.json: ${meta.slice(0, 400)}`);
@@ -519,6 +552,12 @@ check("retire self-deletes the identity and cleans the instance home", () => {
 check("no real credential store was read or written", () => {
   assert(!existsSync(join(HOME, ".aw")), "the probe HOME must stay free of aweb state");
   for (const dir of [sandbox]) assert(existsSync(dir), `${dir} vanished`);
+});
+
+check("no stub was invoked in a way the probe did not plan for", () => {
+  // Runs last on purpose: any stub call outside the handled set appended here.
+  const seen = existsSync(UNEXPECTED) ? readFileSync(UNEXPECTED, "utf8").trim() : "";
+  equal(seen, "", `unexpected stub invocations:\n${seen}`);
 });
 
 console.log(results.join("\n"));
