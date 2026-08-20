@@ -200,3 +200,34 @@ test("validator rejects a skill tree containing an escaping symlink", (t) => {
   assert.equal(result.status, 1);
   assert.match(result.stderr, /escap/);
 });
+
+test("validator rejects a template whose list is a block sequence", (t) => {
+  // The OAS config reader drops those lines, so the adopter would get an EMPTY
+  // agent-types map from a template that validated as a populated one.
+  const result = runFixture(t, {
+    manifestExtras: { configTemplates: { default: { path: "config-templates/default/oas-config.yaml" } } },
+    files: { "config-templates/default/oas-config.yaml": `${PORTABLE_TEMPLATE}agent-types:\n  - developer\n` },
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /block sequences are dropped/);
+});
+
+test("validator rejects a sequence item that is itself a mapping", (t) => {
+  const result = runFixture(t, {
+    manifestExtras: { configTemplates: { default: { path: "config-templates/default/oas-config.yaml" } } },
+    files: { "config-templates/default/oas-config.yaml": `${PORTABLE_TEMPLATE}agent-types:\n  - developer:\n` },
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /block sequences are dropped/);
+});
+
+test("validator rejects a template smuggling config behind __proto__", (t) => {
+  // Without the refusal this PASSES: the schema walk enumerates own properties
+  // and sees nothing, while the kernel reads the settings off the prototype.
+  const result = runFixture(t, {
+    manifestExtras: { configTemplates: { default: { path: "config-templates/default/oas-config.yaml" } } },
+    files: { "config-templates/default/oas-config.yaml": "__proto__:\n  capabilities:\n    layers:\n      messaging: none\n" },
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /not a usable config key/);
+});

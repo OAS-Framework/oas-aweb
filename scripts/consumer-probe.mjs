@@ -163,6 +163,8 @@ check("the gate refuses YAML the released kernel silently drops or reinterprets"
     "anchor": ["a: &anchor 1\n", (v) => equal(v.a, "&anchor 1", "the kernel reads an anchor as literal text")],
     "block scalar": ["a: |\n  text\n", (v) => equal(v.a, "|", "the kernel reads a block scalar indicator as literal text")],
     "tag": ["a: !!str 1\n", (v) => equal(v.a, "!!str 1", "the kernel reads a tag as literal text")],
+    "mapping-valued sequence item": ["agent-types:\n  - developer:\n",
+      (v) => deepEqual(v["agent-types"], { "- developer": {} }, "the kernel turns it into a key literally named \"- developer\"")],
   };
   for (const [label, [source, kernelExpectation]] of Object.entries(misread)) {
     kernelExpectation(kernelCore.parseYamlNested(source));
@@ -170,6 +172,19 @@ check("the gate refuses YAML the released kernel silently drops or reinterprets"
     try { parseKernelYaml(source); } catch { threw = true; }
     assert(threw, `the gate must reject ${label}, which the kernel accepts with a different meaning`);
   }
+});
+
+check("a __proto__ key cannot smuggle config past an enumerating validator", () => {
+  // The sharpest case: the released kernel produces an object with NO own
+  // properties — so any schema walk sees an empty config — while the settings
+  // still resolve through the prototype and would be applied.
+  const smuggled = "__proto__:\n  capabilities:\n    layers:\n      messaging: none\n";
+  const parsed = kernelCore.parseYamlNested(smuggled);
+  deepEqual(Object.keys(parsed), [], "the kernel leaves no own key for a validator to inspect");
+  equal(parsed.capabilities?.layers?.messaging, "none", "yet the kernel still reads the smuggled layer");
+  let threw = false;
+  try { parseKernelYaml(smuggled); } catch { threw = true; }
+  assert(threw, "the gate must refuse a __proto__ key outright");
 });
 
 // ============================================================ acquire + lock

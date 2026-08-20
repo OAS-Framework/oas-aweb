@@ -53,6 +53,14 @@ test("an inline '#' is stripped even inside quotes, as the kernel strips it", ()
 for (const [label, source, pattern] of [
   ["block sequences", "agent-types:\n  - developer\n", /block sequences are dropped/],
   ["bare sequence items", "- developer\n", /block sequences are dropped/],
+  // `- developer:` satisfies the kernel's key regex, so checking for a sequence
+  // only after that match let it through as a key named "- developer".
+  ["mapping-valued sequence items", "agent-types:\n  - developer:\n", /block sequences are dropped/],
+  ["empty sequence items", "agent-types:\n  -\n", /block sequences are dropped/],
+  ["__proto__ keys", "__proto__:\n  capabilities: x\n", /not a usable config key/],
+  ["quoted __proto__ keys", '"__proto__": 1', /not a usable config key/],
+  ["nested __proto__ keys", "team:\n  __proto__: x\n", /not a usable config key/],
+  ["__proto__ inside a flow map", "settings: {__proto__: x}", /not a usable config key/],
   ["block scalars", "a: |\n  text", /block scalars/],
   ["anchors", "a: &anchor 1", /anchors/],
   ["aliases", "a: *anchor", /aliases/],
@@ -68,3 +76,22 @@ for (const [label, source, pattern] of [
     assert.throws(() => parseKernelYaml(source), pattern);
   });
 }
+
+test("a __proto__ key would hide an entire config from an enumerating validator", () => {
+  // The reason it is refused rather than parsed: both readers produce an object
+  // with NO own properties, so a schema walk sees an empty document — while
+  // `cfg.capabilities` still resolves, off the prototype.
+  const smuggled = "__proto__:\n  capabilities:\n    layers:\n      messaging: none\n";
+  assert.throws(() => parseKernelYaml(smuggled), /not a usable config key/);
+  const naive = {};
+  naive.__proto__ = { capabilities: { layers: { messaging: "none" } } };
+  assert.deepEqual(Object.keys(naive), [], "own keys are empty, which is what fooled the gate");
+  assert.equal(naive.capabilities.layers.messaging, "none", "yet the value reads back through the prototype");
+});
+
+test("ordinary keys that merely look dangerous stay usable", () => {
+  // Only __proto__ has the setter behaviour; assigning these creates own
+  // properties a validator can see, so refusing them would be superstition.
+  assert.deepEqual(parseKernelYaml("constructor: a\nprototype: b"), { constructor: "a", prototype: "b" });
+  assert.deepEqual(parseKernelYaml("a: -3"), { a: -3 }, "a negative scalar is not a sequence item");
+});
