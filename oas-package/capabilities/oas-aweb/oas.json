@@ -1,9 +1,9 @@
 {
   "capability": "oas.aweb",
   "command": "aweb",
-  "version": "1.8.0",
+  "version": "2.0.0",
   "compatibility": {
-    "oas": ">=0.19.0"
+    "oas": ">=0.20.0"
   },
   "layer": "messaging",
   "description": "Messaging layer via aweb: per-instance team identities + native aw mail/chat skills + cross-machine team roster.",

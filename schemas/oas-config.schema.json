@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oas.dev/schemas/oas-config.schema.json",
+  "title": "OAS scoped configuration",
+  "$defs": {
+    "settings": { "type": "object", "additionalProperties": true },
+    "binding": {
+      "oneOf": [
+        { "type": "boolean" },
+        {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "settings": { "$ref": "#/$defs/settings" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "injection-override": { "type": "string", "description": "Override an instruction injection: a config-relative path, none, or default. Convention: .agents/injections/…" },
+    "capabilityTargets": {
+      "type": "object",
+      "properties": {
+        "from": { "type": "string", "description": "Enforced provenance: installed | owned | path:<dir>." },
+        "global": { "$ref": "#/$defs/binding" },
+        "agent-types": {
+          "oneOf": [
+            { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+            { "type": "object", "additionalProperties": { "$ref": "#/$defs/binding" } }
+          ]
+        },
+        "souls": { "type": "object", "additionalProperties": { "$ref": "#/$defs/binding" } },
+        "settings": { "$ref": "#/$defs/settings" },
+        "injection-override": { "$ref": "#/$defs/injection-override" }
+      }
+    },
+    "layerEntry": {
+      "oneOf": [
+        { "const": "none" },
+        {
+          "allOf": [{ "$ref": "#/$defs/capabilityTargets" }],
+          "type": "object",
+          "required": ["capability"],
+          "properties": {
+            "capability": { "type": "string" },
+            "from": true, "global": true, "agent-types": true, "souls": true, "settings": true, "injection-override": true
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "additiveEntry": {
+      "allOf": [{ "$ref": "#/$defs/capabilityTargets" }],
+      "type": "object",
+      "properties": {
+        "from": true, "global": true, "agent-types": true, "souls": true, "settings": true, "injection-override": true
+      },
+      "additionalProperties": false
+    },
+    "workMode": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "properties": {
+            "setup": { "type": "string", "description": "Env-bootstrap command run inside each new worktree after creation (path relative to this config's directory)." }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "type": "object",
+  "properties": {
+    "name": { "type": "string" },
+    "team": {
+      "type": "object",
+      "description": "The deployment/team boundary. Closest scope declaring team: wins; used for identity, cross-repo agent discovery (oas status --team), and messaging providers.",
+      "properties": {
+        "name": { "type": "string" },
+        "id": { "type": "string", "description": "Explicit provider team id (e.g. aweb <name>:<namespace>)." }
+      },
+      "required": ["name"],
+      "additionalProperties": false
+    },
+    "agent-types": {
+      "type": "object",
+      "description": "Agent families declared by name; membership is `type: <name>` in each soul.yaml.",
+      "additionalProperties": {
+        "oneOf": [
+          { "type": "null" },
+          {
+            "type": "object",
+            "properties": { "description": { "type": "string" } },
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "layers": {
+          "type": "object",
+          "description": "The three exclusive fundamental slots: a capability entry or an explicit none.",
+          "properties": {
+            "knowledge": { "$ref": "#/$defs/layerEntry" },
+            "messaging": { "$ref": "#/$defs/layerEntry" },
+            "tasks": { "$ref": "#/$defs/layerEntry" }
+          },
+          "additionalProperties": false
+        },
+        "additive": {
+          "type": "object",
+          "propertyNames": { "pattern": "^(?:@?[a-z0-9][a-z0-9._-]*[./])[a-z0-9][a-z0-9._/-]*$" },
+          "additionalProperties": { "$ref": "#/$defs/additiveEntry" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "skill-overrides": { "type": "object", "additionalProperties": { "type": "string" } },
+    "templates": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Named oas init templates: local config paths or git URLs whose main branch carries an oas-config.yaml." },
+    "agents-md-injection": { "oneOf": [{ "type": "string" }, { "type": "object", "additionalProperties": { "type": "string" } }], "description": "Extra unconditional instruction blocks (adds content; does not override packaged defaults)." },
+    "oas": {
+      "type": "object",
+      "properties": { "injection-override": { "$ref": "#/$defs/injection-override" } },
+      "additionalProperties": false
+    },
+    "work-modes": {
+      "type": "object",
+      "properties": {
+        "worktree": { "$ref": "#/$defs/workMode" },
+        "checkout": { "$ref": "#/$defs/workMode" },
+        "attached": { "$ref": "#/$defs/workMode" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
