@@ -70,8 +70,6 @@ const KERNEL = resolveKernel();
 const NODE_ONLY = join(sandbox, "node-only");
 mkdirSync(NODE_ONLY, { recursive: true });
 symlinkSync(process.execPath, join(NODE_ONLY, "node"));
-const BASE_PATH = `${NODE_ONLY}:/usr/bin:/bin`;
-
 /** Every stub records an unexpected invocation here; the probe fails at the end
  * if the file exists. A stub that silently returns 0 for a call nobody planned
  * cannot fail a run it was never supposed to take part in. */
@@ -88,8 +86,27 @@ function shim(dir, name, body) {
 
 /** Binaries the released kernel resolves that this probe must control rather
  * than inherit: the runtime binaries (resolved even for a scaffold-only spawn),
- * the aweb CLI, and tmux. */
-const CONTROLLED = ["aw", "pi", "claude", "tmux"];
+ * the aweb CLI, and tmux. They are controlled two different ways, because they
+ * are not the same kind of dependency.
+ *
+ * For these, ABSENCE is the thing under test — several checks assert the kernel
+ * refuses to spawn when the aweb CLI or a declared runtime cannot be resolved,
+ * so a placeholder on PATH would quietly change what is being measured. */
+const MUST_BE_ABSENT = ["aw", "pi", "claude"];
+/** tmux is different: the kernel legitimately runs it (retire closes the
+ * instance window), so the requirement is not that it be missing but that it
+ * never be the HOST's. Shadow it with a refusing stub ahead of /usr/bin so the
+ * guarantee holds by construction. Asserting its absence instead made the
+ * probe's isolation a property of the machine: my laptop keeps tmux in
+ * /opt/homebrew/bin so the check passed, and GitHub's ubuntu runners ship
+ * /usr/bin/tmux so it aborted there — the preflight was right both times, and
+ * the PATH was wrong. */
+const MUST_BE_OURS = ["tmux"];
+const CONTROLLED = [...MUST_BE_ABSENT, ...MUST_BE_OURS];
+
+const DENY_BIN = join(sandbox, "deny-bin");
+for (const bin of MUST_BE_OURS) shim(DENY_BIN, bin, "");
+const BASE_PATH = `${NODE_ONLY}:${DENY_BIN}:/usr/bin:/bin`;
 
 function oas(args, { cwd = sandbox, path = BASE_PATH, env = {}, expect = "ok" } = {}) {
   const run = spawnSync(process.execPath, [KERNEL, ...args], {
@@ -147,13 +164,14 @@ check(`kernel under test is the declared floor ${KERNEL_VERSION}`, () => {
 // inspected (not just up to the first hit) and the run aborts if any is
 // reachable.
 {
-  const reachable = CONTROLLED
-    .map((bin) => [bin, spawnSync("sh", ["-c", `command -v ${bin}`], { env: { PATH: BASE_PATH }, encoding: "utf8" }).stdout.trim()])
-    .filter(([, found]) => found);
-  const node = spawnSync("sh", ["-c", "command -v node"], { env: { PATH: BASE_PATH }, encoding: "utf8" }).stdout.trim();
+  const resolves = (bin) =>
+    spawnSync("sh", ["-c", `command -v ${bin}`], { env: { PATH: BASE_PATH }, encoding: "utf8" }).stdout.trim();
   const problems = [
-    ...reachable.map(([bin, found]) => `  ${bin} is reachable from the probe PATH at ${found}`),
-    ...(node ? [] : ["  node is NOT reachable from the probe PATH"]),
+    ...MUST_BE_ABSENT.map((bin) => [bin, resolves(bin)]).filter(([, found]) => found)
+      .map(([bin, found]) => `  ${bin} is reachable at ${found} — its ABSENCE is what several checks measure`),
+    ...MUST_BE_OURS.map((bin) => [bin, resolves(bin), join(DENY_BIN, bin)]).filter(([, found, stub]) => found !== stub)
+      .map(([bin, found, stub]) => `  ${bin} resolves to ${found || "nothing"}, not the probe's refusing stub at ${stub}`),
+    ...(resolves("node") ? [] : ["  node is NOT reachable from the probe PATH"]),
     ...(process.env.HOME === HOME ? ["  HOME was inherited rather than replaced"] : []),
   ];
   if (problems.length) {
@@ -162,7 +180,7 @@ check(`kernel under test is the declared floor ${KERNEL_VERSION}`, () => {
     process.exit(1);
   }
 }
-results.push(`  ok   the probe PATH controls every executable the kernel may resolve (${CONTROLLED.join(", ")})`);
+results.push(`  ok   the probe PATH controls every executable the kernel may resolve (absent: ${MUST_BE_ABSENT.join(", ")}; shadowed by a refusing stub: ${MUST_BE_OURS.join(", ")})`);
 
 // ======================================================= config-reader parity
 // The repo gate schema-checks the shipped template with scripts/lib/kernel-yaml.mjs.
@@ -533,6 +551,14 @@ check("every stub refuses and records a call the probe did not plan for", () => 
   const recorded = existsSync(UNEXPECTED) ? readFileSync(UNEXPECTED, "utf8") : "";
   for (const bin of ["aw", "pi", "tmux"]) {
     assert(recorded.includes(`${bin}: unplanned-subcommand`), `${bin} stub must RECORD the unplanned call, log was:\n${recorded}`);
+  }
+  for (const bin of MUST_BE_OURS) {
+    // The shadowing stub is load-bearing on hosts that ship the real binary:
+    // if it ever stopped refusing, BASE_PATH would fall through to the host's.
+    const run = spawnSync(join(DENY_BIN, bin), ["deny-probe-call"], { encoding: "utf8", env: { PATH: BASE_PATH, HOME } });
+    assert(run.status !== 0, `the shadowing ${bin} stub must fail every call, got exit ${run.status}`);
+    const log = existsSync(UNEXPECTED) ? readFileSync(UNEXPECTED, "utf8") : "";
+    assert(log.includes(`${bin}: deny-probe-call`), `the shadowing ${bin} stub must RECORD the call, log was:\n${log}`);
   }
   rmSync(UNEXPECTED, { force: true });
 });
