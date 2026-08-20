@@ -645,7 +645,19 @@ const FAKE_BIN = join(sandbox, "fake-bin");
 const AW_STATE = join(sandbox, "aw-calls.log");
 const PI_EXT = join(sandbox, "pi-packages", "awebai-pi");
 mkdirSync(PI_EXT, { recursive: true });
-shim(FAKE_BIN, "pi", `if [ "$1" = "list" ]; then printf '  npm:@awebai/pi\\n      %s\\n' ${shq(PI_EXT)}; exit 0; fi`);
+// The stub BODIES are factories over the paths they write, so the hostile-path
+// self-test below can build the same stubs over hostile paths instead of
+// keeping a second copy of the shell text that would drift from these.
+const piBody = (ext) => `if [ "$1" = "list" ]; then printf '  npm:@awebai/pi\\n      %s\\n' ${shq(ext)}; exit 0; fi`;
+const awBody = (log) => `echo "$@" >> ${shq(log)}
+case "$1 $2" in
+  "team list") printf '{"active_team":"${TEAM}","memberships":[{"team_id":"${TEAM}"}]}\\n'; exit 0 ;;
+  "team invite") printf '{"token":"probe-invite-token"}\\n'; exit 0 ;;
+  "team join") printf '{"alias":"%s","team_id":"${TEAM}"}\\n' "$5"; exit 0 ;;
+  "init "*|"init") mkdir -p .aw; exit 0 ;;
+  "workspace delete") exit 0 ;;
+esac`;
+shim(FAKE_BIN, "pi", piBody(PI_EXT));
 // tmux is MUST_BE_OURS, not forbidden: retire legitimately closes the instance's
 // window. What --no-launch must never do is CREATE one, so the stub answers the
 // teardown calls and refuses everything else — a `new-session`, `new-window` or
@@ -656,34 +668,50 @@ esac`);
 // Each handled call exits 0 HERE; anything unmatched falls through to the
 // shared recorder in shim(), so no branch can silently swallow a call the probe
 // never planned for.
-shim(FAKE_BIN, "aw", `echo "$@" >> ${shq(AW_STATE)}
-case "$1 $2" in
-  "team list") printf '{"active_team":"${TEAM}","memberships":[{"team_id":"${TEAM}"}]}\\n'; exit 0 ;;
-  "team invite") printf '{"token":"probe-invite-token"}\\n'; exit 0 ;;
-  "team join") printf '{"alias":"%s","team_id":"${TEAM}"}\\n' "$5"; exit 0 ;;
-  "init "*|"init") mkdir -p .aw; exit 0 ;;
-  "workspace delete") exit 0 ;;
-esac`);
+shim(FAKE_BIN, "aw", awBody(AW_STATE));
 const FAKE_PATH = `${FAKE_BIN}:${BASE_PATH}`;
 
-check("a generated stub quotes its paths, so a hostile sandbox path cannot execute", () => {
+check("EVERY generated stub quotes EVERY path it writes, apostrophes included", () => {
   // The sandbox lives under TMPDIR, which the ENVIRONMENT controls, and its
   // path is pasted into /bin/sh text the probe then runs. Unquoted, that is a
-  // command-injection sink, not merely a spaces-in-paths bug. Exercise the real
-  // shim() — a self-test with its own copy of the generator would drift from
-  // the thing it is supposed to protect.
+  // command-injection sink, not merely a spaces-in-paths bug.
+  //
+  // Cover every sink and both hostile spellings. An earlier version of this
+  // test exercised only the shared marker and used no apostrophe, so dropping
+  // shq() from the aw or pi call site — or breaking the '\'' replacement inside
+  // the helper — left it green. Sinks times spellings, not one example.
+  const HOSTILE = "x ;touch SIDE_EFFECT; #'q";
   const home = join(sandbox, "hostile-path-test");
-  const bin = join(home, "bin ;touch SIDE_EFFECT; #");
-  const marker = join(home, "marker ;touch SIDE_EFFECT; #.log");
-  const stub = shim(bin, "victim", "", marker);
-  const run = spawnSync(stub, ["an arg ;touch SIDE_EFFECT; #"], { cwd: home, encoding: "utf8", env: { PATH: BASE_PATH, HOME } });
+  const bin = join(home, `bin ${HOSTILE}`);
+  const arg = `an arg ${HOSTILE}`;
+  const sideEffects = (dir) => (existsSync(dir) ? readdirSync(dir).filter((e) => e.startsWith("SIDE_EFFECT")) : []);
 
-  equal(run.status, 90, `the stub must still refuse; stderr: ${run.stderr}`);
+  // Sink 1: the shared unexpected-call marker, written by shim()'s trailer.
+  const marker = join(home, `marker ${HOSTILE}.log`);
+  const victim = shim(bin, "victim", "", marker);
+  const refused = spawnSync(victim, [arg], { cwd: home, encoding: "utf8", env: { PATH: BASE_PATH, HOME } });
+  equal(refused.status, 90, `the stub must still refuse; stderr: ${refused.stderr}`);
   assert(existsSync(marker), `the marker must be written to the EXACT hostile path, not a split prefix (${marker})`);
-  equal(readFileSync(marker, "utf8").trim(), "victim: an arg ;touch SIDE_EFFECT; #", "recorded line");
-  // Injection would land a file in the stub's working directory.
-  deepEqual(readdirSync(home).filter((e) => e.startsWith("SIDE_EFFECT")), [], "no side-effect file may be created");
-  deepEqual(readdirSync(bin).filter((e) => e.startsWith("SIDE_EFFECT")), [], "no side-effect file beside the stub");
+  equal(readFileSync(marker, "utf8").trim(), `victim: ${arg}`, "recorded line");
+
+  // Sink 2: the aweb call log, written by the REAL aw stub body.
+  const awLog = join(home, `aw-calls ${HOSTILE}.log`);
+  const aw = shim(bin, "aw-hostile", awBody(awLog), marker);
+  const awRun = spawnSync(aw, ["team", "list"], { cwd: home, encoding: "utf8", env: { PATH: BASE_PATH, HOME } });
+  equal(awRun.status, 0, `the aw stub must answer a planned call; stderr: ${awRun.stderr}`);
+  assert(existsSync(awLog), `the aw call log must be written to the EXACT hostile path (${awLog})`);
+  equal(readFileSync(awLog, "utf8").trim(), "team list", "logged aw call");
+
+  // Sink 3: the pi extension path, PRINTED by the REAL pi stub body.
+  const piExt = join(home, `pi-ext ${HOSTILE}`);
+  const pi = shim(bin, "pi-hostile", piBody(piExt), marker);
+  const piRun = spawnSync(pi, ["list"], { cwd: home, encoding: "utf8", env: { PATH: BASE_PATH, HOME } });
+  equal(piRun.status, 0, `the pi stub must answer a planned call; stderr: ${piRun.stderr}`);
+  assert(piRun.stdout.includes(piExt), `pi must print the EXACT extension path, got: ${JSON.stringify(piRun.stdout)}`);
+
+  // Injection would land a file wherever the stub ran, or beside it.
+  deepEqual(sideEffects(home), [], "no side-effect file in the stub's working directory");
+  deepEqual(sideEffects(bin), [], "no side-effect file beside the stubs");
   assert(!existsSync(join(REPO, "SIDE_EFFECT")), "no side-effect file in the repository");
 });
 
