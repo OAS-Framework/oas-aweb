@@ -203,6 +203,46 @@ check("a __proto__ key cannot smuggle config past an enumerating validator", () 
   assert(threw, "the gate must refuse a __proto__ key outright");
 });
 
+// ================================================ self-containment parity
+check("agents[]/skills[] kind rules match the released kernel exactly", () => {
+  // The kernel rejects a non-directory under agents[] and accepts a file under
+  // skills[]. The repo gate mirrors that; here BOTH are run over the same two
+  // fixtures so the agreement is machine-checked per run rather than asserted.
+  const bench = join(sandbox, "kind-parity");
+  const gate = join(bench, "gate");
+  mkdirSync(join(gate, "scripts", "lib"), { recursive: true });
+  mkdirSync(join(gate, "schemas"), { recursive: true });
+  for (const f of ["validate-manifests.mjs"]) cpSync(join(REPO, "scripts", f), join(gate, "scripts", f));
+  cpSync(join(REPO, "scripts", "lib", "kernel-yaml.mjs"), join(gate, "scripts", "lib", "kernel-yaml.mjs"));
+  for (const f of ["oas-package", "capability-manifest", "oas-config"]) {
+    cpSync(join(REPO, "schemas", `${f}.schema.json`), join(gate, "schemas", `${f}.schema.json`));
+  }
+
+  for (const [key, expected] of [["agents", "reject"], ["skills", "accept"]]) {
+    const capDir = join(gate, "oas-package", "capabilities", "one");
+    rmSync(join(gate, "oas-package"), { recursive: true, force: true });
+    mkdirSync(capDir, { recursive: true });
+    writeFileSync(join(gate, "oas-package", "oas-package.json"), JSON.stringify({
+      package: "test.kind", version: "1.0.0", description: "kind parity fixture",
+      compatibility: { oas: `>=${KERNEL_VERSION}` }, capabilities: ["capabilities/one"],
+    }) + "\n");
+    writeFileSync(join(capDir, "thing.md"), "---\nname: thing\n---\n");
+    const manifest = {
+      capability: "test.kind", version: "1.0.0", compatibility: { oas: `>=${KERNEL_VERSION}` },
+      description: "kind parity fixture", requires: [], [key]: ["thing.md"],
+    };
+    writeFileSync(join(capDir, "oas.json"), JSON.stringify(manifest) + "\n");
+
+    const gateRun = spawnSync(process.execPath, [join(gate, "scripts", "validate-manifests.mjs")], { cwd: gate, encoding: "utf8" });
+    const gateVerdict = gateRun.status === 0 ? "accept" : "reject";
+    let kernelVerdict = "accept";
+    try { kernelCore.assertCapabilitySelfContained(capDir, manifest); }
+    catch { kernelVerdict = "reject"; }
+    equal(kernelVerdict, expected, `released kernel verdict for a FILE under ${key}[]`);
+    equal(gateVerdict, expected, `repo gate verdict for a FILE under ${key}[] (${gateRun.stderr.trim()})`);
+  }
+});
+
 // ============================================================ acquire + lock
 const scope = newScope("consumer");
 const install = oasJson(["install", SOURCE, "--dir", scope, "--no-requirements"]);

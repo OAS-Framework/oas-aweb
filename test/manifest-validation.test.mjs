@@ -450,3 +450,29 @@ for (const [label, value] of [
     assert.equal(result.status, 0, `${label} is portable: ${result.stderr}`);
   });
 }
+
+// Released 0.20 self-containment is ASYMMETRIC by resource kind: a
+// capability-defined agent is a soul DIRECTORY (soul.yaml + AGENTS.md), so a
+// file cannot be one; a skill may legitimately be a single file and is simply
+// not walked. A validator that collapses both to "walk it if it is a directory"
+// silently accepts a file under agents[] — the wave audit found exactly that in
+// a sibling package. Both directions are pinned, because a lone agents[] test
+// reads as "directories required" and invites making skills[] strict to match.
+test("validator rejects a capability-defined agent that is a file", (t) => {
+  const result = runFixture(t, {
+    ...canonicalTemplate,
+    capabilityExtras: () => ({ agents: ["thing.md"] }),
+    files: { ...canonicalTemplate.files, "capabilities/one/thing.md": "not a soul directory\n" },
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /capability-defined agent is not a directory/);
+});
+
+test("validator accepts a skill that is a single file", (t) => {
+  const result = runFixture(t, {
+    ...canonicalTemplate,
+    capabilityExtras: () => ({ skills: ["thing.md"] }),
+    files: { ...canonicalTemplate.files, "capabilities/one/thing.md": "---\nname: thing\n---\n" },
+  });
+  assert.equal(result.status, 0, `a single-file skill is legal and must not be rejected: ${result.stderr}`);
+});
