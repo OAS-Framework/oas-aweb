@@ -295,6 +295,37 @@ check("agents[]/skills[] kind rules match the released kernel exactly", () => {
   }
 });
 
+// =================================================== documented acquisition
+// README tells adopters how to acquire this package. That prose is a contract
+// the kernel enforces, and nothing here could falsify it: the local-path source
+// below never exercises source PARSING, so a source spelling the released CLI
+// rejects could ship in the README indefinitely. It did — the documented
+// pinned-Git command was `git:https://github.com/...`, which is neither the
+// `git:host/org/repo` shorthand nor a raw URL, and exits 1 with invalid-source.
+// The trap is that `git:https://...` IS what the kernel writes into the lock as
+// the NORMALIZED form; reading a normalized value back as an input spelling is
+// how the wrong command got written down. Parse every documented spelling with
+// the kernel's own parser so the README cannot drift from the released contract.
+check("every `oas install <source>` spelling in README parses under the released kernel", () => {
+  const readme = readFileSync(join(REPO, "README.md"), "utf8");
+  const specs = [...readme.matchAll(/^\s*oas install\s+(\S+)/gm)]
+    .map((m) => m[1])
+    .filter((spec) => !spec.startsWith("--"));
+  assert(specs.length >= 2, `expected README to document acquisition, found ${specs.length} spelling(s)`);
+  for (const spec of specs) {
+    let parsed;
+    try { parsed = kernelCore.parsePackageSource(spec); }
+    catch (e) { throw new Error(`README documents "oas install ${spec}", which the released kernel rejects: ${e.code || ""} ${e.message}`); }
+    assert(["git", "catalog", "path"].includes(parsed.kind), `"${spec}" parsed as unexpected kind ${parsed.kind}`);
+  }
+  // The pinned-Git line specifically must parse as Git and carry its ref.
+  const pinned = specs.find((spec) => spec.includes("github.com"));
+  assert(pinned, "README must document a pinned Git source");
+  const parsed = kernelCore.parsePackageSource(pinned);
+  equal(parsed.kind, "git", "the documented published source is a Git source");
+  assert(parsed.ref, `the documented Git source must be pinned to a ref: "${pinned}"`);
+});
+
 // ============================================================ acquire + lock
 const scope = newScope("consumer");
 const install = oasJson(["install", SOURCE, "--dir", scope, "--no-requirements"]);
@@ -304,6 +335,93 @@ check("released kernel acquires the local package root and locks it", () => {
   equal(install.result.installed[0].package, "oas.aweb", "locked package identity");
   equal(install.result.installed[0].version, PACKAGE_MANIFEST.version, "locked package version");
   equal(install.result.installed[0].path, ".", "selected package root (a local path source is an exact directory)");
+});
+
+// ------------------------------------------- acquisition from a pinned Git ref
+// The local-path source above locks commit="local" and path="." — it cannot
+// show that the kernel picks the package root OUT of a repository, pins the
+// exact commit rather than following the branch, or normalizes the source as
+// Git. Build a throwaway origin carrying this payload at oas-package/, then
+// move the branch on AFTER pinning so "locked the pinned commit" cannot pass by
+// accidentally locking ambient HEAD.
+//
+// No "#<path>" fragment is passed, deliberately: oas-package IS the released
+// kernel's default package path for a Git source, so the path assertion below
+// pins the DEFAULT rather than an explicit selection. Confirmed against the
+// released CLI by moving the payload to the repository root, which it refuses
+// with invalid-package-manifest: "has an oas-package.json at the repository
+// ROOT but no package at package path \"oas-package\" (the default) — select
+// the root explicitly with ...#.".
+const gitOrigin = join(sandbox, "git-origin");
+const IDENT = ["-c", "user.email=probe@example.invalid", "-c", "user.name=probe"];
+mkdirSync(join(gitOrigin, "oas-package"), { recursive: true });
+cpSync(SOURCE, join(gitOrigin, "oas-package"), { recursive: true });
+git(gitOrigin, ["init", "-q", "-b", "main", "."]);
+git(gitOrigin, ["add", "-A"]);
+git(gitOrigin, [...IDENT, "commit", "-q", "-m", "payload at the pinned ref"]);
+const PINNED_COMMIT = git(gitOrigin, ["rev-parse", "HEAD"]);
+writeFileSync(join(gitOrigin, "MOVED-AFTER-PIN"), "the branch advanced after the pin\n");
+git(gitOrigin, ["add", "-A"]);
+git(gitOrigin, [...IDENT, "commit", "-q", "-m", "advance the branch past the pin"]);
+const HEAD_AFTER_PIN = git(gitOrigin, ["rev-parse", "HEAD"]);
+
+const gitScope = newScope("git-consumer");
+const GIT_SPEC = `file://${gitOrigin}@${PINNED_COMMIT}`;
+const gitInstall = oasJson(["install", GIT_SPEC, "--dir", gitScope, "--no-requirements"]);
+
+check("released kernel acquires this payload from a PINNED Git source", () => {
+  assert(gitInstall.ok, `pinned Git install failed: ${JSON.stringify(gitInstall.error)}`);
+  const row = gitInstall.result.installed[0];
+  equal(row.package, "oas.aweb", "locked package identity");
+  equal(row.version, PACKAGE_MANIFEST.version, "locked package version");
+  equal(row.path, "oas-package", "selected package root inside the repository");
+});
+
+check("a pinned Git source locks the PINNED commit, not the branch's ambient HEAD", () => {
+  const row = lockOf(gitScope).packages["oas.aweb"];
+  assert(PINNED_COMMIT !== HEAD_AFTER_PIN, "the fixture must advance the branch past the pin");
+  equal(row.commit, PINNED_COMMIT, "locked commit is the pinned one");
+  assert(row.commit !== HEAD_AFTER_PIN, "the lock must not follow the branch past the pinned ref");
+  equal(row.path, "oas-package", "locked package root");
+});
+
+check("a Git source is normalized as Git in the lock, never as a path", () => {
+  const row = lockOf(gitScope).packages["oas.aweb"];
+  assert(row.source.startsWith("git:"), `source must normalize as Git, got "${row.source}"`);
+  assert(!row.source.startsWith("path:"), `a Git source must never lock as a path: "${row.source}"`);
+  assert(row.source.includes(PINNED_COMMIT), `the normalized source must carry the pinned ref: "${row.source}"`);
+});
+
+check("the same payload acquired two ways materializes identical CONTENT", () => {
+  // Everything except the provenance record must be byte-identical: acquisition
+  // transport is not supposed to change what gets installed.
+  const walk = (root, base = "") => readdirSync(join(root, base), { withFileTypes: true })
+    .flatMap((e) => (e.isDirectory() ? walk(root, join(base, e.name)) : [join(base, e.name)]));
+  const RECORD = ".oas-installation.json";
+  const fromGit = installedDir(gitScope);
+  const fromPath = installedDir(scope);
+  const gitFiles = walk(fromGit).sort();
+  deepEqual(gitFiles, walk(fromPath).sort(), "materialized file lists");
+  const differing = gitFiles.filter((rel) =>
+    !readFileSync(join(fromGit, rel)).equals(readFileSync(join(fromPath, rel))));
+  deepEqual(differing, [RECORD], "only the provenance record may differ between acquisitions");
+  equal(lockOf(gitScope).capabilities["oas.aweb"].path, lockOf(scope).capabilities["oas.aweb"].path,
+    "materialized capability path");
+});
+
+check("the installation record carries the Git provenance, and trust binds to it", () => {
+  const record = readJson(join(installedDir(gitScope), ".oas-installation.json"));
+  equal(record.commit, PINNED_COMMIT, "recorded commit is the pinned one");
+  equal(record.packagePath, "oas-package", "recorded package root");
+  assert(record.source.startsWith("git:"), `recorded source must be Git: "${record.source}"`);
+  // Provenance is INSIDE the hashed artifact, so the same content acquired from
+  // a different source is a different artifact. That is the trust boundary, not
+  // a defect: an approval granted to the local-path build must not silently
+  // carry over to one pulled from a repository.
+  const gitIntegrity = lockOf(gitScope).capabilities["oas.aweb"].integrity;
+  assert(gitIntegrity !== lockOf(scope).capabilities["oas.aweb"].integrity,
+    "identical content from a different source must NOT hash the same — trust would transfer across provenance");
+  equal(lockOf(gitScope).capabilities["oas.aweb"].trusted, false, "acquisition never confers trust");
 });
 
 check("lock is lockfileVersion 2 with BOTH the package and capability levels", () => {

@@ -50,7 +50,7 @@ oas doctor /path/to/scope --soul <soul-name>
 A pinned Git source may be used after publication:
 
 ```bash
-oas install git:https://github.com/OAS-Framework/oas-aweb.git@v2.0.0 --dir /path/to/scope
+oas install https://github.com/OAS-Framework/oas-aweb.git@v2.0.0 --dir /path/to/scope
 ```
 
 Commands and identity lifecycle hooks are executable, so they require explicit per-capability trust bound to the exact materialized-artifact integrity. Re-projecting a changed source invalidates that approval.
