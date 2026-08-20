@@ -411,3 +411,42 @@ test("prose mentioning a file: in a comment is not a file URI", (t) => {
   });
   assert.equal(result.status, 0, result.stderr);
 });
+
+// The URL exemption belongs to a URL SPAN, not to the whole scalar because a
+// URL happened to start it — and the embedded scan must cover every local-path
+// class, not just the person-identifying roots the comment markers look for.
+for (const [label, value] of [
+  ["a path after a leading URL", "https://example.test/guide --config=/Users/alice/private.yaml"],
+  ["an embedded /etc path", "launch --config=/etc/oas/private.yaml"],
+  ["an embedded /tmp path", "launch --config=/tmp/local/private.yaml"],
+  ["an embedded Windows drive path with backslashes", "launch --config=C:\\work\\private.yaml"],
+  ["an embedded Windows drive path with forward slashes", "launch --config=C:/work/private.yaml"],
+  ["an embedded Windows UNC path", "copy \\\\server\\share\\private.yaml here"],
+  ["an embedded Windows root-relative path", "use \\rooted\\private.yaml now"],
+  ["an embedded tilde-user path", "launch --config=~alice/private.yaml"],
+  ["an embedded single-slash file: URI", "read file:/etc/oas/instructions.md first"],
+  ["an embedded $HOME reference", "launch --config=$HOME/private.yaml"],
+]) {
+  test(`validator rejects ${label}`, (t) => {
+    const result = runFixture(t, {
+      manifestExtras: { configTemplates: { default: { path: "config-templates/default/oas-config.yaml" } } },
+      files: { "config-templates/default/oas-config.yaml": `${PORTABLE_TEMPLATE}agents-md-injection: "${value}"\n` },
+    });
+    assert.equal(result.status, 1, `${label} must not reach an adopter`);
+    assert.match(result.stderr, /not portable/);
+  });
+}
+
+for (const [label, value] of [
+  ["a URL that follows prose", "open https://example.test/Users/guide"],
+  ["two URLs whose paths spell local-looking roots", "see https://example.test/home/x and https://example.test/Users/y"],
+  ["an scp-style git remote after prose", "clone git@github.com:OAS-Framework/oas-aweb.git"],
+]) {
+  test(`validator accepts ${label}`, (t) => {
+    const result = runFixture(t, {
+      manifestExtras: { configTemplates: { default: { path: "config-templates/default/oas-config.yaml" } } },
+      files: { "config-templates/default/oas-config.yaml": `${PORTABLE_TEMPLATE}agents-md-injection: "${value}"\n` },
+    });
+    assert.equal(result.status, 0, `${label} is portable: ${result.stderr}`);
+  });
+}

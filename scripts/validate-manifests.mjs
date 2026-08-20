@@ -163,11 +163,45 @@ const CREDENTIAL_KEY = /(^|[_-])(tokens?|secrets?|passwo?rds?|api[_-]?keys?|cred
  * are copied to the adopter as faithfully as its values. */
 const CREDENTIAL_ASSIGNMENT = /(^|[^\w])-{0,2}(tokens?|secrets?|passwo?rds?|api[_-]?keys?|credentials?)\s*[:=]/i;
 
+/** A COMPLETE URL span anywhere inside a scalar. Used to remove portable
+ * references before looking for local paths in what remains — the exemption
+ * belongs to the URL itself, not to the whole scalar because a URL happened to
+ * start it. `file:` spans are deliberately left in place: they ARE local paths.
+ */
+const URL_SPAN = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"']+/gi;
+function withoutPortableUrls(text) {
+  return String(text).replace(URL_SPAN, (span) => (/^file:/i.test(span) ? span : " ".repeat(span.length)));
+}
+
+/** Local-path forms as they appear EMBEDDED in a larger string (after a space,
+ * quote, bracket, `=` or separator). Every class nonPortableValue recognises at
+ * the start of a scalar has an entry here, because an argument string is just
+ * as identifying as a bare value — and reusing the deliberately narrow comment
+ * markers instead let `--config=/etc/oas/private.yaml` through. */
+const PATH_BOUNDARY = `(?:^|[\\s"'(=,;])`;
+const EMBEDDED_LOCAL_PATH = [
+  [new RegExp(`${PATH_BOUNDARY}file:(?://|/|[A-Za-z]:)`, "i"), "a file: URI"],
+  [new RegExp(`${PATH_BOUNDARY}~(?:[/\\\\]|[A-Za-z0-9_.-]+[/\\\\])`), "a home-relative (~) path"],
+  [new RegExp(`${PATH_BOUNDARY}[A-Za-z]:[\\\\/]`), "a Windows drive-letter path"],
+  [new RegExp(`${PATH_BOUNDARY}\\\\\\\\[^\\\\\\s]`), "a Windows UNC network path"],
+  [new RegExp(`${PATH_BOUNDARY}\\\\[^\\\\\\s]`), "a Windows root-relative path"],
+  [new RegExp(`${PATH_BOUNDARY}/[^\\s]`), "an absolute machine path"],
+];
+
+/** Why a local path embedded in this scalar cannot travel, or undefined. */
+function embeddedLocalPath(value) {
+  const text = withoutPortableUrls(value);
+  for (const [pattern, what] of EMBEDDED_LOCAL_PATH) if (pattern.test(text)) return what;
+  return undefined;
+}
+
 /** Markers that identify a PERSON or MACHINE. Applied ONLY to comment text:
- * scalars are classified structurally by nonPortableValue, which exempts URLs,
- * and running these over the whole file would override that exemption — the
- * portable value https://docs.example.test/home/getting-started would be
- * rejected as a user home directory. */
+ * scalars get the stricter EMBEDDED_LOCAL_PATH scan above, and running these
+ * over the whole file would override its URL handling — the portable value
+ * https://docs.example.test/home/getting-started would be rejected as a user
+ * home directory. Comments stay deliberately narrow because they are PROSE: an
+ * illustrative "/etc/oas" in a sentence is documentation, while the same string
+ * in a value is configuration. Only a person/machine identity leaks here. */
 const IDENTIFYING_MARKERS = [
   [/\/(Users|home)\/[^\s/"']+/, "a user home directory"],
   [/[A-Za-z]:\\Users\\[^\s\\"']+/i, "a Windows user profile directory"],
@@ -197,17 +231,17 @@ function checkPortability(node, at, path = []) {
   const reason = nonPortableValue(node);
   if (reason) {
     report(at, `config template is not portable — "${where}" is ${reason} (${JSON.stringify(node)}); templates are adopted verbatim into other people's deployments`);
-  } else if (typeof node === "string" && !URL_SCHEME.test(node.trim())) {
-    // nonPortableValue only classifies a value that IS a path. A machine path
-    // EMBEDDED in a larger scalar — `launch --config=/Users/alice/private.yaml`
-    // — identifies its author just as well, so the same markers used on comments
-    // apply here. An ordinary URL keeps its exemption: whatever its path spells,
-    // it is not a local path.
-    for (const [pattern, what] of IDENTIFYING_MARKERS) {
-      if (pattern.test(node)) {
-        report(at, `config template is not portable — "${where}" embeds ${what} (${JSON.stringify(node)}); templates are adopted verbatim into other people's deployments`);
-        break;
-      }
+  } else if (typeof node === "string") {
+    // nonPortableValue only classifies a value that IS a path. One EMBEDDED in a
+    // larger scalar identifies its author just as well, so the remainder of the
+    // string — after complete non-file URL spans are removed — is scanned for
+    // every local-path class. Removing URLs by SPAN rather than exempting the
+    // whole scalar is what makes
+    //   "https://example.test/guide --config=/Users/alice/private.yaml"
+    // fail while "open https://example.test/Users/guide" passes.
+    const embedded = embeddedLocalPath(node);
+    if (embedded) {
+      report(at, `config template is not portable — "${where}" embeds ${embedded} (${JSON.stringify(node)}); templates are adopted verbatim into other people's deployments`);
     }
   }
   if (typeof node === "string" && CREDENTIAL_ASSIGNMENT.test(node)) {
