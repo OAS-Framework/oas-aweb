@@ -57,11 +57,17 @@ function checkSchema(value, schema, at, rootSchema, collect) {
     value.forEach((item, index) => checkSchema(item, schema.items, `${at}[${index}]`, rootSchema, collect));
   }
   if (value && actual === "object") {
-    for (const key of schema.required || []) if (!(key in value)) emit(at, `missing required property ${key}`);
+    // OWN properties only, everywhere. `"constructor" in {}` is true — as are
+    // toString, valueOf, hasOwnProperty and five more — so an `in` test against
+    // a schema's `properties` map dispatches an inherited FUNCTION as if it were
+    // a subschema, and `additionalProperties: false` never fires. A template
+    // carrying a root `constructor:` key would then pass this gate and be
+    // rejected only later, by the kernel, in the adopter's deployment.
+    for (const key of schema.required || []) if (!Object.hasOwn(value, key)) emit(at, `missing required property ${key}`);
     const properties = schema.properties || {};
     for (const [key, item] of Object.entries(value)) {
       if (schema.propertyNames?.pattern && !(new RegExp(schema.propertyNames.pattern)).test(key)) emit(`${at}.${key}`, `property name must match ${schema.propertyNames.pattern}`);
-      if (key in properties) checkSchema(item, properties[key], `${at}.${key}`, rootSchema, collect);
+      if (Object.hasOwn(properties, key)) checkSchema(item, properties[key], `${at}.${key}`, rootSchema, collect);
       else if (schema.additionalProperties === false) emit(`${at}.${key}`, "unknown property");
       else if (schema.additionalProperties && typeof schema.additionalProperties === "object") checkSchema(item, schema.additionalProperties, `${at}.${key}`, rootSchema, collect);
     }
@@ -219,7 +225,7 @@ for (const [index, capabilityDir] of declaredCapabilities.entries()) {
   };
   for (const [name, command] of Object.entries(manifest.commands || {})) safeResource(capabilityRoot, entrypoint(command), `${capabilityDir}/oas.json.commands.${name}`, "command entrypoint", capabilityRoot);
   for (const [event, hook] of Object.entries(manifest.hooks || {})) safeResource(capabilityRoot, entrypoint(hook), `${capabilityDir}/oas.json.hooks.${event}`, "hook entrypoint", capabilityRoot);
-  for (const forbidden of ["global", "agent-types", "souls"]) if (forbidden in manifest) report(`${capabilityDir}/oas.json.${forbidden}`, "deployment targeting belongs to config, not a capability manifest");
+  for (const forbidden of ["global", "agent-types", "souls"]) if (Object.hasOwn(manifest, forbidden)) report(`${capabilityDir}/oas.json.${forbidden}`, "deployment targeting belongs to config, not a capability manifest");
 }
 
 if (capabilities.length === 1 && packageManifest) {

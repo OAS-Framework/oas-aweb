@@ -174,6 +174,22 @@ check("the gate refuses YAML the released kernel silently drops or reinterprets"
   }
 });
 
+check("the gate catches config keys the kernel would reject in the adopter's scope", () => {
+  // The repo gate schema-checks the template; this proves the gate's verdict
+  // and the kernel's agree, so a bad key fails HERE and not in someone else's
+  // deployment. (The kernel rejects it, though its own message garbles the
+  // inherited value — `RENAMED_CONFIG_KEYS["constructor"]` resolves through
+  // Object.prototype. Recorded, not worked around.)
+  const bad = newScope("bad-config");
+  writeFileSync(join(bad, "oas-config.yaml"), "name: demo\nconstructor: anything\n");
+  const run = oas(["doctor", bad], { expect: "fail" });
+  assert(/constructor/.test(run.text), `the kernel must reject the key: ${run.text.slice(0, 300)}`);
+  if (/function Object\(\)/.test(run.text)) {
+    defect("released 0.20.0 config-key error resolves through Object.prototype (kernel defect — no package workaround)",
+      `a rejected key named "constructor" is reported with an inherited value:\n${(run.text.split("\n").find((l) => l.trim().startsWith("Error: unsupported oas-config key")) || "").trim()}`);
+  }
+});
+
 check("a __proto__ key cannot smuggle config past an enumerating validator", () => {
   // The sharpest case: the released kernel produces an object with NO own
   // properties — so any schema walk sees an empty config — while the settings
@@ -213,7 +229,7 @@ check("package row locks transport only — no transitional keys", () => {
   deepEqual(row.dependencies, [], "dependencies are always recorded, empty when there are none");
   assert(/^sha256-[0-9a-f]{64}$/.test(row.integrity), "payload integrity digest");
   for (const forbidden of ["capabilities", "trustedCapabilities", "depsIntegrity"]) {
-    assert(!(forbidden in row), `package row must not carry the transitional key "${forbidden}"`);
+    assert(!Object.hasOwn(row, forbidden), `package row must not carry the transitional key "${forbidden}"`);
   }
 });
 

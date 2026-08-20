@@ -89,9 +89,13 @@ test("a __proto__ key would hide an entire config from an enumerating validator"
   assert.equal(naive.capabilities.layers.messaging, "none", "yet the value reads back through the prototype");
 });
 
-test("ordinary keys that merely look dangerous stay usable", () => {
-  // Only __proto__ has the setter behaviour; assigning these creates own
-  // properties a validator can see, so refusing them would be superstition.
-  assert.deepEqual(parseKernelYaml("constructor: a\nprototype: b"), { constructor: "a", prototype: "b" });
+test("keys that merely look dangerous become ordinary OWN properties", () => {
+  // Only __proto__ has the setter behaviour. Assigning these creates own
+  // properties, so the parser keeps them (kernel parity) and it is the schema
+  // layer's job to reject the ones the config schema does not define — see the
+  // manifest-gate regression for a root `constructor` key.
+  const parsed = parseKernelYaml("constructor: a\nprototype: b");
+  assert.deepEqual(Object.keys(parsed), ["constructor", "prototype"], "visible to any own-property walk");
+  assert.equal(parsed.constructor, "a");
   assert.deepEqual(parseKernelYaml("a: -3"), { a: -3 }, "a negative scalar is not a sequence item");
 });

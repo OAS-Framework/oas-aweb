@@ -231,3 +231,31 @@ test("validator rejects a template smuggling config behind __proto__", (t) => {
   assert.equal(result.status, 1);
   assert.match(result.stderr, /not a usable config key/);
 });
+
+test("validator rejects template keys the config schema does not define", (t) => {
+  // `"constructor" in {}` is true — so is toString, valueOf and six more — and
+  // an `in`-based schema dispatch would hand back Object.prototype.constructor
+  // as if it were a subschema, letting the key through additionalProperties:
+  // false. The released kernel then rejects the adopted config, in someone
+  // else's deployment rather than here.
+  for (const key of ["constructor", "toString", "valueOf", "hasOwnProperty"]) {
+    const result = runFixture(t, {
+      manifestExtras: { configTemplates: { default: { path: "config-templates/default/oas-config.yaml" } } },
+      files: { "config-templates/default/oas-config.yaml": `${PORTABLE_TEMPLATE}${key}: anything\n` },
+    });
+    assert.equal(result.status, 1, `a root ${key} key must be rejected`);
+    assert.match(result.stderr, new RegExp(`${key}: unknown property`));
+  }
+});
+
+test("validator still reports a genuinely missing required property", (t) => {
+  // The `required` check moved to own-property semantics too: `"constructor" in
+  // value` is true for EVERY object, so an inherited name could satisfy a
+  // required key that is not actually there.
+  const result = runFixture(t, {
+    manifestExtras: { configTemplates: { default: { path: "config-templates/default/oas-config.yaml" } } },
+    files: { "config-templates/default/oas-config.yaml": "name: demo\ncapabilities:\n  layers:\n    messaging:\n      from: installed\n" },
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /missing required property capability/);
+});
