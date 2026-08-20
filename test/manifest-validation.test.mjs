@@ -35,7 +35,7 @@ function runFixture(t, {
   mkdirSync(join(fixture, "schemas"), { recursive: true });
   mkdirSync(join(fixture, "oas-package"), { recursive: true });
   copyFileSync(join(ROOT, "scripts", "validate-manifests.mjs"), join(fixture, "scripts", "validate-manifests.mjs"));
-  copyFileSync(join(ROOT, "scripts", "lib", "yaml-subset.mjs"), join(fixture, "scripts", "lib", "yaml-subset.mjs"));
+  copyFileSync(join(ROOT, "scripts", "lib", "kernel-yaml.mjs"), join(fixture, "scripts", "lib", "kernel-yaml.mjs"));
   for (const schema of ["oas-package", "capability-manifest", "oas-config"]) {
     copyFileSync(join(ROOT, "schemas", `${schema}.schema.json`), join(fixture, "schemas", `${schema}.schema.json`));
   }

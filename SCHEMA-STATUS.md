@@ -11,9 +11,13 @@ and declares the floor `>=0.20.0`.
 `schemas/oas-lock.schema.json`, and `schemas/oas-config.schema.json` are
 byte-identical to `docs/` in the published `@oas-framework/oas@0.20.0` tarball.
 `npm run validate` checks both manifests and the shipped config template
-against them; `npm run probe` re-checks the same payload with the released
-kernel itself, so a drift between the vendored copies and the engine cannot
-pass silently.
+against them, reading the template with `scripts/lib/kernel-yaml.mjs` — a
+deliberate mirror of the kernel's own config reader, which rejects every
+construct that reader silently drops or reinterprets rather than validating a
+meaning the deployment will never see. `npm run probe` re-checks the same
+payload with the released kernel itself, and asserts the two readers agree value
+for value, so drift between the vendored copies and the engine cannot pass
+silently.
 
 ## Runtime channel resources — contract frozen (was: strict-curriculum block)
 

@@ -2,7 +2,7 @@
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseYamlSubset } from "./lib/yaml-subset.mjs";
+import { parseKernelYaml } from "./lib/kernel-yaml.mjs";
 
 // Repo root holds dev tooling (scripts/, schemas/); the DISTRIBUTED package
 // payload lives in the `oas-package/` subtree. Manifests and their resources
@@ -162,9 +162,11 @@ for (const [name, spec] of Object.entries(templates)) {
   for (const [pattern, what] of NON_PORTABLE) {
     if (pattern.test(source)) report(at, `config template is not portable — it contains ${what}; templates are adopted verbatim into other people's deployments`);
   }
+  // Parsed with the KERNEL's own semantics, so what is schema-checked here is
+  // what an adopter's deployment will actually see.
   let parsed;
-  try { parsed = parseYamlSubset(source); }
-  catch (error) { report(at, `config template is not parseable YAML: ${error.message}`); continue; }
+  try { parsed = parseKernelYaml(source); }
+  catch (error) { report(at, `config template uses YAML the OAS config reader does not support: ${error.message}`); continue; }
   if (configSchema) validateSchema(parsed, configSchema, `${spec.path}`);
 }
 

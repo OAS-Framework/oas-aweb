@@ -19,7 +19,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PAYLOAD = join(REPO, "oas-package");
@@ -127,6 +127,49 @@ const TEMPLATE = readFileSync(join(SOURCE, PACKAGE_MANIFEST.configTemplates.defa
 console.log(`consumer probe — kernel ${oas(["version"]).stdout.trim()}\n  payload: ${PAYLOAD}\n  sandbox: ${sandbox}\n`);
 check(`kernel under test is the declared floor ${KERNEL_VERSION}`, () => {
   assert(oas(["version"]).stdout.includes(KERNEL_VERSION), `kernel is not ${KERNEL_VERSION}`);
+});
+
+// ======================================================= config-reader parity
+// The repo gate schema-checks the shipped template with scripts/lib/kernel-yaml.mjs.
+// That is only sound while it agrees with the reader the kernel ACTUALLY uses:
+// a validator that understands more YAML than the kernel would bless a template
+// the deployment then reads differently. Assert the agreement against the
+// released kernel itself, over the template plus the shapes most likely to drift.
+const kernelCore = await import(pathToFileURL(join(dirname(dirname(KERNEL)), "lib", "core.mjs")).href);
+const { parseKernelYaml } = await import(pathToFileURL(join(REPO, "scripts", "lib", "kernel-yaml.mjs")).href);
+
+check("the gate's config reader agrees with the released kernel's, value for value", () => {
+  const corpus = {
+    "the shipped template": TEMPLATE,
+    "inline list": "agent-types: [developer, reviewer]\n",
+    "inline map": "settings: {retries: 2, mode: fast}\n",
+    "quoted value carrying a hash": 'name: "a # b"\n',
+    "trailing comment": "name: a # b\n",
+    "quoted value carrying a colon": 'name: "a: b"\n',
+    "key with no value": "knowledge:\n",
+    "booleans, numbers and null": "a: true\nb: FALSE\nc: null\nd: ~\ne: 3\nf: 1.5\n",
+    "deep nesting": "a:\n  b:\n    c: 1\n  d: true\n",
+  };
+  for (const [label, source] of Object.entries(corpus)) {
+    deepEqual(parseKernelYaml(source), kernelCore.parseYamlNested(source), `config-reader parity — ${label}`);
+  }
+});
+
+check("the gate refuses YAML the released kernel silently drops or reinterprets", () => {
+  // Each of these parses in the kernel WITHOUT error and means something other
+  // than it looks like, so the gate must stop rather than validate the illusion.
+  const misread = {
+    "block sequence": ["agent-types:\n  - developer\n", (v) => deepEqual(v["agent-types"], {}, "the kernel drops block sequence items")],
+    "anchor": ["a: &anchor 1\n", (v) => equal(v.a, "&anchor 1", "the kernel reads an anchor as literal text")],
+    "block scalar": ["a: |\n  text\n", (v) => equal(v.a, "|", "the kernel reads a block scalar indicator as literal text")],
+    "tag": ["a: !!str 1\n", (v) => equal(v.a, "!!str 1", "the kernel reads a tag as literal text")],
+  };
+  for (const [label, [source, kernelExpectation]] of Object.entries(misread)) {
+    kernelExpectation(kernelCore.parseYamlNested(source));
+    let threw = false;
+    try { parseKernelYaml(source); } catch { threw = true; }
+    assert(threw, `the gate must reject ${label}, which the kernel accepts with a different meaning`);
+  }
 });
 
 // ============================================================ acquire + lock

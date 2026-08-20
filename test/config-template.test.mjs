@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { parseYamlSubset } from "../scripts/lib/yaml-subset.mjs";
+import { parseKernelYaml } from "../scripts/lib/kernel-yaml.mjs";
 
 const REPO = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const ROOT = join(REPO, "oas-package");
@@ -23,7 +23,7 @@ test("the capability root is dedicated, never the package root", () => {
 });
 
 test("the reference config binds aweb as the exclusive messaging layer", () => {
-  const template = parseYamlSubset(readFileSync(join(ROOT, PACKAGE.configTemplates.default.path), "utf8"));
+  const template = parseKernelYaml(readFileSync(join(ROOT, PACKAGE.configTemplates.default.path), "utf8"));
   assert.equal(template.capabilities.layers.messaging.capability, "oas.aweb");
   // `from: installed` is what binds the artifact this package materialized,
   // rather than whatever else happens to carry the same id at that scope.
@@ -34,7 +34,7 @@ test("the reference config binds aweb as the exclusive messaging layer", () => {
 
 test("the reference config is portable: a team name to change, no team id", () => {
   const source = readFileSync(join(ROOT, PACKAGE.configTemplates.default.path), "utf8");
-  const template = parseYamlSubset(source);
+  const template = parseKernelYaml(source);
   assert.equal(template.team.name, "my-team", "a placeholder the adopter must replace");
   assert.equal(template.team.id, undefined, "a provider team id is deployment-local and must not ship");
   // Adopted verbatim into someone else's deployment: nothing here may be ours.
