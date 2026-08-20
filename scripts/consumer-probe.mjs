@@ -75,11 +75,21 @@ symlinkSync(process.execPath, join(NODE_ONLY, "node"));
  * cannot fail a run it was never supposed to take part in. */
 const UNEXPECTED = join(sandbox, "unexpected-invocations.log");
 
+/** POSIX single-quoting for a value interpolated into a generated /bin/sh
+ * script. The sandbox path comes from TMPDIR, which the environment controls,
+ * so an unquoted path is a command-injection sink and not merely a
+ * spaces-in-paths bug: a TMPDIR of `/tmp/x;touch OWNED;#` would otherwise be
+ * pasted straight into a stub the probe then executes. Everything the probe
+ * writes into shell — paths, markers, fixture values — goes through this. */
+function shq(value) {
+  return `'${String(value).replaceAll("'", `'\\''`)}'`;
+}
+
 /** A stub that handles the calls named in `body` and REFUSES everything else. */
-function shim(dir, name, body) {
+function shim(dir, name, body, marker = UNEXPECTED) {
   mkdirSync(dir, { recursive: true });
   const file = join(dir, name);
-  writeFileSync(file, `#!/bin/sh\n${body}\nprintf '%s: %s\\n' "${name}" "$*" >> ${UNEXPECTED}\nexit 90\n`);
+  writeFileSync(file, `#!/bin/sh\n${body}\nprintf '%s: %s\\n' ${shq(name)} "$*" >> ${shq(marker)}\nexit 90\n`);
   chmodSync(file, 0o755);
   return file;
 }
@@ -635,7 +645,7 @@ const FAKE_BIN = join(sandbox, "fake-bin");
 const AW_STATE = join(sandbox, "aw-calls.log");
 const PI_EXT = join(sandbox, "pi-packages", "awebai-pi");
 mkdirSync(PI_EXT, { recursive: true });
-shim(FAKE_BIN, "pi", `if [ "$1" = "list" ]; then printf '  npm:@awebai/pi\\n      ${PI_EXT}\\n'; exit 0; fi`);
+shim(FAKE_BIN, "pi", `if [ "$1" = "list" ]; then printf '  npm:@awebai/pi\\n      %s\\n' ${shq(PI_EXT)}; exit 0; fi`);
 // tmux is MUST_BE_OURS, not forbidden: retire legitimately closes the instance's
 // window. What --no-launch must never do is CREATE one, so the stub answers the
 // teardown calls and refuses everything else — a `new-session`, `new-window` or
@@ -646,7 +656,7 @@ esac`);
 // Each handled call exits 0 HERE; anything unmatched falls through to the
 // shared recorder in shim(), so no branch can silently swallow a call the probe
 // never planned for.
-shim(FAKE_BIN, "aw", `echo "$@" >> ${AW_STATE}
+shim(FAKE_BIN, "aw", `echo "$@" >> ${shq(AW_STATE)}
 case "$1 $2" in
   "team list") printf '{"active_team":"${TEAM}","memberships":[{"team_id":"${TEAM}"}]}\\n'; exit 0 ;;
   "team invite") printf '{"token":"probe-invite-token"}\\n'; exit 0 ;;
@@ -655,6 +665,27 @@ case "$1 $2" in
   "workspace delete") exit 0 ;;
 esac`);
 const FAKE_PATH = `${FAKE_BIN}:${BASE_PATH}`;
+
+check("a generated stub quotes its paths, so a hostile sandbox path cannot execute", () => {
+  // The sandbox lives under TMPDIR, which the ENVIRONMENT controls, and its
+  // path is pasted into /bin/sh text the probe then runs. Unquoted, that is a
+  // command-injection sink, not merely a spaces-in-paths bug. Exercise the real
+  // shim() — a self-test with its own copy of the generator would drift from
+  // the thing it is supposed to protect.
+  const home = join(sandbox, "hostile-path-test");
+  const bin = join(home, "bin ;touch SIDE_EFFECT; #");
+  const marker = join(home, "marker ;touch SIDE_EFFECT; #.log");
+  const stub = shim(bin, "victim", "", marker);
+  const run = spawnSync(stub, ["an arg ;touch SIDE_EFFECT; #"], { cwd: home, encoding: "utf8", env: { PATH: BASE_PATH, HOME } });
+
+  equal(run.status, 90, `the stub must still refuse; stderr: ${run.stderr}`);
+  assert(existsSync(marker), `the marker must be written to the EXACT hostile path, not a split prefix (${marker})`);
+  equal(readFileSync(marker, "utf8").trim(), "victim: an arg ;touch SIDE_EFFECT; #", "recorded line");
+  // Injection would land a file in the stub's working directory.
+  deepEqual(readdirSync(home).filter((e) => e.startsWith("SIDE_EFFECT")), [], "no side-effect file may be created");
+  deepEqual(readdirSync(bin).filter((e) => e.startsWith("SIDE_EFFECT")), [], "no side-effect file beside the stub");
+  assert(!existsSync(join(REPO, "SIDE_EFFECT")), "no side-effect file in the repository");
+});
 
 check("every stub refuses and records a call the probe did not plan for", () => {
   // Runs before the stubs are used in anger, and resets the marker afterwards.
@@ -684,7 +715,7 @@ mkdirSync(join(adopted, ".aw"), { recursive: true });
 check("required spawn hook fails the spawn and rolls it back when aw is absent", () => {
   // pi is satisfied, aw is not: the identity cannot be minted, and an instance
   // that believes it is reachable by mail but is not must never start.
-  const piOnly = shim(join(sandbox, "pi-only"), "pi", `if [ "$1" = "list" ]; then printf '  npm:@awebai/pi\\n      ${PI_EXT}\\n'; exit 0; fi`);
+  const piOnly = shim(join(sandbox, "pi-only"), "pi", `if [ "$1" = "list" ]; then printf '  npm:@awebai/pi\\n      %s\\n' ${shq(PI_EXT)}; exit 0; fi`);
   const spawned = oasJson(["spawn", "probe-pi", "--purpose", "norequire", "--task", "probe", "--no-launch"],
     { cwd: adopted, path: `${dirname(piOnly)}:${BASE_PATH}`, expect: "fail" });
   equal(spawned.ok, false, "spawn must fail");
