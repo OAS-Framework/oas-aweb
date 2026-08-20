@@ -102,7 +102,6 @@ const MUST_BE_ABSENT = ["aw", "pi", "claude"];
  * /usr/bin/tmux so it aborted there — the preflight was right both times, and
  * the PATH was wrong. */
 const MUST_BE_OURS = ["tmux"];
-const CONTROLLED = [...MUST_BE_ABSENT, ...MUST_BE_OURS];
 
 const DENY_BIN = join(sandbox, "deny-bin");
 for (const bin of MUST_BE_OURS) shim(DENY_BIN, bin, "");
@@ -519,7 +518,7 @@ const AW_STATE = join(sandbox, "aw-calls.log");
 const PI_EXT = join(sandbox, "pi-packages", "awebai-pi");
 mkdirSync(PI_EXT, { recursive: true });
 shim(FAKE_BIN, "pi", `if [ "$1" = "list" ]; then printf '  npm:@awebai/pi\\n      ${PI_EXT}\\n'; exit 0; fi`);
-// tmux is CONTROLLED, not forbidden: retire legitimately closes the instance's
+// tmux is MUST_BE_OURS, not forbidden: retire legitimately closes the instance's
 // window. What --no-launch must never do is CREATE one, so the stub answers the
 // teardown calls and refuses everything else — a `new-session`, `new-window` or
 // `send-keys` fails the probe rather than silently starting a session.
