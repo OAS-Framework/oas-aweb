@@ -168,13 +168,84 @@ test("validator rejects a template that violates the config schema", (t) => {
   assert.match(result.stderr, /capabilities\.layers\.chat: unknown property/);
 });
 
-test("validator rejects a template that is not portable", (t) => {
+// A template is adopted VERBATIM into someone else's deployment, so a value
+// that IS a machine path cannot travel — in ANY spelling a host might produce.
+// Enumerating known roots (/Users, /home, ...) missed /tmp, every Windows form
+// and tilde-home, so these fixtures pin the classes rather than the roots.
+for (const [label, value] of [
+  ["a POSIX absolute path under a known home", "/Users/someone/skills/aweb"],
+  ["a POSIX absolute path under any other root", "/tmp/local-machine/instructions.md"],
+  ["a POSIX absolute system path", "/etc/oas/instructions.md"],
+  ["a Windows drive-letter path with backslashes", "C:\\Users\\local\\instructions.md"],
+  ["a Windows drive-letter path with forward slashes", "C:/Users/local/instructions.md"],
+  ["a Windows UNC network path", "\\\\server\\share\\instructions.md"],
+  ["a Windows root-relative path", "\\rooted\\instructions.md"],
+  ["a tilde-home path", "~/machine-local/instructions.md"],
+  ["a tilde-user path", "~someone/instructions.md"],
+  ["a $HOME reference", "$HOME/instructions.md"],
+  ["a ${HOME} reference", "${HOME}/instructions.md"],
+  ["a %USERPROFILE% reference", "%USERPROFILE%\\instructions.md"],
+  ["a file:// URL", "file:///Users/me/instructions.md"],
+]) {
+  test(`validator rejects a template value that is ${label}`, (t) => {
+    const result = runFixture(t, {
+      manifestExtras: { configTemplates: { default: { path: "config-templates/default/oas-config.yaml" } } },
+      files: { "config-templates/default/oas-config.yaml": `${PORTABLE_TEMPLATE}agents-md-injection: "${value}"\n` },
+    });
+    assert.equal(result.status, 1, `${label} must not travel to another machine`);
+    assert.match(result.stderr, /is not portable/);
+  });
+}
+
+// The mirror risk: a rule broad enough to catch every path spelling must not
+// start rejecting the portable references a template legitimately carries.
+for (const [label, value] of [
+  ["an https URL", "https://aweb.ai/docs"],
+  ["a git https remote", "https://github.com/OAS-Framework/oas-aweb.git"],
+  ["an scp-style git remote", "git@github.com:OAS-Framework/oas-aweb.git"],
+  ["a scope-relative path", ".agents/injections/aweb.md"],
+  ["a bare relative path", "injections/aweb.md"],
+  ["the literal none", "none"],
+]) {
+  test(`validator accepts ${label}, which is portable`, (t) => {
+    const result = runFixture(t, {
+      manifestExtras: { configTemplates: { default: { path: "config-templates/default/oas-config.yaml" } } },
+      files: { "config-templates/default/oas-config.yaml": `${PORTABLE_TEMPLATE}agents-md-injection: "${value}"\n` },
+    });
+    assert.equal(result.status, 0, `${label} must not be mistaken for a machine path: ${result.stderr}`);
+  });
+}
+
+test("validator rejects a credential-shaped setting key anywhere in a template", (t) => {
   const result = runFixture(t, {
     manifestExtras: { configTemplates: { default: { path: "config-templates/default/oas-config.yaml" } } },
-    files: { "config-templates/default/oas-config.yaml": `${PORTABLE_TEMPLATE}skill-overrides:\n  aweb-messaging: /Users/someone/skills/aweb\n` },
+    // Nested under the template's existing capabilities block, so this fixture
+    // fails for the credential key and nothing else.
+    files: { "config-templates/default/oas-config.yaml": `${PORTABLE_TEMPLATE}  additive:\n    x.y:\n      settings:\n        api_key: abc\n` },
   });
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /is not portable — it contains an absolute machine path/);
+  assert.match(result.stderr, /credential-shaped setting/);
+  assert.doesNotMatch(result.stderr, /duplicate mapping key|unknown property/, "the fixture must fail for the credential key alone");
+});
+
+test("validator rejects a machine path leaked in a template COMMENT", (t) => {
+  // Comments are adopted verbatim too, so a username in one travels just as far.
+  const result = runFixture(t, {
+    manifestExtras: { configTemplates: { default: { path: "config-templates/default/oas-config.yaml" } } },
+    files: { "config-templates/default/oas-config.yaml": `# see /Users/someone/notes.md\n${PORTABLE_TEMPLATE}` },
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /user home directory/);
+});
+
+test("validator does not flag an illustrative placeholder path in prose", (t) => {
+  // "/path/to/scope" identifies no person or machine; flagging it would make the
+  // rule unusable for the documentation a good template carries.
+  const result = runFixture(t, {
+    manifestExtras: { configTemplates: { default: { path: "config-templates/default/oas-config.yaml" } } },
+    files: { "config-templates/default/oas-config.yaml": `# adopt it into /path/to/scope\n${PORTABLE_TEMPLATE}` },
+  });
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test("validator rejects a capability resource that escapes its own capability root", (t) => {

@@ -122,13 +122,73 @@ function isCanonicalTemplatePath(p) {
   return !rest.split("/").some((seg) => seg === "" || seg === "." || seg === "..");
 }
 
-/** A distributed template is adopted verbatim into someone else's deployment,
- * so it must carry nothing local to ours. */
-const NON_PORTABLE = [
-  [/(^|[^\w])\/(Users|home|var|opt|private)\//, "an absolute machine path"],
-  [/\$\{?(HOME|USER|PWD)\b/, "a host environment path"],
-  [/\b(token|secret|password|api[_-]?key|credential)\b\s*[:=]/i, "a credential-shaped setting"],
+// A distributed template is adopted VERBATIM into someone else's deployment, so
+// it must carry nothing local to ours. Enumerating a few known path roots was
+// not enough — /tmp, Windows and tilde-home forms all sailed through — so the
+// rule is now structural: a value that IS an absolute or home-relative path, in
+// any of the spellings a host might produce, is non-portable regardless of which
+// directory it names.
+
+/** A URL with a scheme is a portable reference, not a machine path — except
+ * `file:`, which is exactly a machine path wearing a scheme. */
+const URL_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
+
+/** Host environment references, wherever they appear inside a value. */
+const HOST_ENV = /\$\{?(HOME|USER|PWD)\b|%(USERPROFILE|HOMEPATH|USERNAME)%/i;
+
+/** Why this scalar cannot travel to another machine, or undefined if it can. */
+function nonPortableValue(value) {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  if (!text) return undefined;
+  if (/^file:\/\//i.test(text)) return "a file:// URL naming a local path";
+  if (HOST_ENV.test(text)) return "a host environment path";
+  if (URL_SCHEME.test(text)) return undefined;           // ordinary URL: portable
+  if (/^~($|[/\\]|[A-Za-z0-9_.-]+)/.test(text)) return "a home-relative (~) path";
+  if (/^[A-Za-z]:[\\/]/.test(text)) return "a Windows drive-letter path";
+  if (/^\\\\[^\\]/.test(text)) return "a Windows UNC network path";
+  if (/^\\(?!\\)/.test(text)) return "a Windows root-relative path";
+  if (/^\//.test(text)) return "an absolute machine path";
+  return undefined;
+}
+
+/** Keys that name a secret. A template is source material an adopter reads and
+ * commits; a credential must never be one of the things they inherit. */
+const CREDENTIAL_KEY = /(^|[_-])(tokens?|secrets?|passwo?rds?|api[_-]?keys?|credentials?)($|[_-])/i;
+
+/** Markers that identify a PERSON or MACHINE. Checked against the raw file,
+ * comments included, because comments are adopted verbatim too — a leaked
+ * username in a comment travels just as far as one in a value. Deliberately
+ * narrow, so an illustrative "/path/to/scope" in prose is not flagged. */
+const IDENTIFYING_MARKERS = [
+  [/\/(Users|home)\/[^\s/"']+/, "a user home directory"],
+  [/[A-Za-z]:\\Users\\[^\s\\"']+/i, "a Windows user profile directory"],
+  [/(^|[\s"'(=])~\//m, "a home-relative (~) path"],
+  [/\$\{?HOME\b|%USERPROFILE%/i, "a host home reference"],
+  [/file:\/\//i, "a file:// URL"],
 ];
+
+/** Walk a parsed config, reporting non-portable values and credential keys. */
+function checkPortability(node, at, path = []) {
+  if (Array.isArray(node)) {
+    node.forEach((item, index) => checkPortability(item, at, [...path, String(index)]));
+    return;
+  }
+  if (node && typeof node === "object") {
+    for (const [key, item] of Object.entries(node)) {
+      const where = [...path, key].join(".");
+      if (CREDENTIAL_KEY.test(key)) {
+        report(at, `config template is not portable — "${where}" is a credential-shaped setting; templates are adopted verbatim into other people's deployments`);
+      }
+      checkPortability(item, at, [...path, key]);
+    }
+    return;
+  }
+  const reason = nonPortableValue(node);
+  if (reason) {
+    report(at, `config template is not portable — "${path.join(".")}" is ${reason} (${JSON.stringify(node)}); templates are adopted verbatim into other people's deployments`);
+  }
+}
 
 const packagePath = join(root, "oas-package.json");
 const packageManifest = readJson(packagePath);
@@ -165,14 +225,18 @@ for (const [name, spec] of Object.entries(templates)) {
   if (!real) continue;
   if (!statSync(real).isFile()) { report(`${at}.path`, `config template is not a file: ${spec.path}`); continue; }
   const source = readFileSync(real, "utf8");
-  for (const [pattern, what] of NON_PORTABLE) {
-    if (pattern.test(source)) report(at, `config template is not portable — it contains ${what}; templates are adopted verbatim into other people's deployments`);
+  for (const [pattern, what] of IDENTIFYING_MARKERS) {
+    if (pattern.test(source)) {
+      report(at, `config template is not portable — it mentions ${what}; templates (comments included) are adopted verbatim into other people's deployments`);
+      break;
+    }
   }
   // Parsed with the KERNEL's own semantics, so what is schema-checked here is
   // what an adopter's deployment will actually see.
   let parsed;
   try { parsed = parseKernelYaml(source); }
   catch (error) { report(at, `config template uses YAML the OAS config reader does not support: ${error.message}`); continue; }
+  checkPortability(parsed, at);
   if (configSchema) validateSchema(parsed, configSchema, `${spec.path}`);
 }
 
