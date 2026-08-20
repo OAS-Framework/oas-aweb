@@ -1,0 +1,42 @@
+# oas.aweb — reference deployment config (aweb as the messaging layer).
+#
+# Adopt it explicitly:
+#
+#   oas init --package oas.aweb          # new scope (this is the default template)
+#   oas config adopt oas.aweb            # switch an existing scope to this base
+#
+# `oas install` NEVER applies this file. Once adopted it is an ordinary,
+# fully editable oas-config.yaml: retarget, disable, or replace anything here,
+# and package updates will not rewrite your edits. `oas config diff` and
+# `oas config sync` compare against the recorded adopted base.
+#
+# Portable by construction: no credential, account, machine path, or aweb
+# team id. The one value you MUST change is `team.name`.
+
+name: aweb-deployment
+
+# The deployment/team boundary. Every instance spawned under this scope is
+# minted a team-scoped aweb identity whose alias is the instance name, so the
+# team roster doubles as the cross-machine directory of live agents.
+#
+# Set this to your own aweb team before spawning. A bare name resolves against
+# the memberships of the aweb root (`aw team list`). Add `id: <name>:<domain>`
+# only if you must pin one specific provider team — it is deployment-local, so
+# it is deliberately absent from this portable template.
+team:
+  name: my-team
+
+capabilities:
+  layers:
+    # The exclusive messaging slot. `from: installed` binds the capability this
+    # package materialized into .agents/capabilities/installed/oas.aweb/.
+    #
+    # Activating aweb does not install anything on its own: the `aw` CLI and the
+    # per-runtime channel adapters stay separately consented host/runtime
+    # requirements (`oas install --accept-requirement aw`). Run `oas aweb setup`
+    # once per deployment for guided onboarding, and `oas doctor` to see what is
+    # still missing.
+    messaging:
+      capability: oas.aweb
+      from: installed
+      global: true

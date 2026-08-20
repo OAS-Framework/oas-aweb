@@ -1,9 +1,64 @@
 # Schema status
 
-- **Corrected schemas verified**: all three vendored schemas are byte-identical to the canonical package-engine reference now merged to main (reviewed head `af49fd542e7190d1da72a6e0b9214036b59cbd7c`; package-engine merge `612b4f8c48efb63be7435df3d4473feba7b25abf`; package-config merge `a0366349915f151b6f6897cb682b7258f9fc1d79`); CI validates package and capability manifests against them.
-- **Vendored-skills decision**: the original `@awebai/pi` npm closure was superseded because its direct `@awebai/aw` dependency carries an install script and platform-specific optional binaries, invalid under v1 platform-invariance. The three required MIT skill trees are now reviewed package-owned resources synchronized from `https://github.com/awebai/aweb.git`, tag `pi-v0.2.3`, commit `812bdeb1be8ed99dbd339a910a153e7b802501d4`; `skills/VENDORED.md`, the upstream `LICENSE`, and the deterministic sync script preserve provenance.
-- **No npm runtime closure**: no runtime dependency manifest, npm lock, or `node_modules` exists in the package. GHSA-mh99-v99m-4gvg is outside this package's source/runtime closure; source integrity covers the vendored skill bytes and no `depsIntegrity` is expected.
-- **Strict-curriculum dependency — Claude aweb-channel plugin (runtime launch contribution, founder taxonomy item 4)**: real-time push events for Claude Code sessions come from the `aweb-channel` plugin. Under the founder taxonomy this plugin is a **declared runtime plugin/extension resource** whose materialization/provenance stays explicit in expected/materialized state; the `spawn` hook only prepares identity/config and returns **structured launch metadata**, and the plugin is never the transport for OAS skills (those are the vendored declarative skill resources). This package currently ships the **development materialization**: the spawn hook imperatively runs `claude plugin marketplace add awebai/claude-plugins` + an unpinned `claude plugin install aweb-channel@awebai-marketplace` and returns `launch: { claude: "--dangerously-load-development-channels plugin:aweb-channel@awebai-marketplace" }`. The **final declared-resource form cannot be authored until the parallel strict-curriculum feature freezes the runtime plugin/extension resource + launch-metadata contract** (there is no declared plugin/extension resource manifest key yet). Everything else here (identity minting, `aw mail`/`aw chat`, vendored skills, roster, `spawn`/`retire` hooks, `roster`/`setup` commands) is prepared independent of that contract. **Exact remaining edit (blocked on strict-curriculum freeze):** declare the `aweb-channel` plugin as a runtime plugin/extension resource with pinned provenance in the capability manifest; reduce the `spawn` hook to preparing identity/config and returning the stable structured `launch` metadata the frozen contract defines (dropping the imperative `claude plugin install` + `--dangerously-load-development-channels` dev flag); update the spawn test's launch-metadata assertion to the frozen form. No other file depends on that contract.
-- `TODO(engine-consumer-fixtures)`: run the released OAS 0.19.0 acquire → lock → trust → activate → spawn probe when WS1 fixtures are available.
+Both items that previously blocked publication are **resolved** by the released
+`@oas-framework/oas@0.20.0` consumer contract (tag `v0.20.0`,
+`1e73257da9ee03a9d9a18a93fe5f410f9d22bc18`). This package targets that contract
+and declares the floor `>=0.20.0`.
 
-No publication tag or catalog entry may be created while either item remains open.
+## Vendored schemas — verified against the release
+
+`schemas/oas-package.schema.json`, `schemas/capability-manifest.schema.json`,
+`schemas/oas-lock.schema.json`, and `schemas/oas-config.schema.json` are
+byte-identical to `docs/` in the published `@oas-framework/oas@0.20.0` tarball.
+`npm run validate` checks both manifests and the shipped config template
+against them, reading the template with `scripts/lib/kernel-yaml.mjs` — a
+deliberate mirror of the kernel's own config reader, which rejects every
+construct that reader silently drops or reinterprets rather than validating a
+meaning the deployment will never see. `npm run probe` re-checks the same
+payload with the released kernel itself, and asserts the two readers agree value
+for value, so drift between the vendored copies and the engine cannot pass
+silently.
+
+## Runtime channel resources — contract frozen (was: strict-curriculum block)
+
+0.20 froze the runtime-resource contract, so the "development materialization"
+this file used to describe is gone:
+
+- the capability manifest declares the pi extension (`npm:@awebai/pi`) and the
+  Claude plugin (`aweb-channel@awebai-marketplace`, marketplace
+  `awebai/claude-plugins`) as **runtime package requirements**;
+- consent is explicit and separate — `oas install --accept-requirement
+  claude:aweb-channel@awebai-marketplace` — and the kernel verifies the package
+  is really installed and enabled **before** a spawn on that runtime, failing
+  closed otherwise;
+- the `spawn` hook prepares identity only and returns **structured launch
+  metadata** (`launch.claude`) for the kernel to place in the launch command. It
+  never runs `claude plugin marketplace add` or `claude plugin install`, and the
+  package test suite asserts that those strings appear nowhere in an executable
+  entrypoint.
+
+`npm run probe` exercises both halves against the released kernel: an
+unsatisfied Claude or pi requirement fails the spawn with the exact
+`--accept-requirement` remedy, and a satisfied one spawns, mints, and retires.
+
+## Runtime closure
+
+No runtime dependency manifest, npm lock, or `node_modules` exists in the
+package, so there is no materialized closure and no `depsIntegrity` to record.
+GHSA-mh99-v99m-4gvg remains outside this package's source and runtime closure.
+The original `@awebai/pi` npm closure was superseded because its direct
+`@awebai/aw` dependency carries an install script and platform-specific optional
+binaries, which v1 platform-invariance forbids. The three required MIT skill
+trees are reviewed, package-owned resources synchronized from
+`https://github.com/awebai/aweb.git`, tag `pi-v0.2.3`, commit
+`812bdeb1be8ed99dbd339a910a153e7b802501d4`;
+`capabilities/oas-aweb/skills/VENDORED.md`, the upstream `LICENSE`, and
+`scripts/sync-vendored-skills.mjs` preserve that provenance.
+
+## Known kernel defect (no package workaround)
+
+On released 0.20.0, `oas doctor` warns that the materialized capability
+"is in installed/ but has no lock entry" even though the v2 lock records it
+under `capabilities`. Per maintainer ruling this is a kernel defect: the package
+adds no workaround, and `npm run probe` records the exact warning alongside the
+lock entry that disproves it, under `KNOWN KERNEL DEFECTS`.

@@ -1,11 +1,18 @@
 {
   "package": "oas.aweb",
-  "version": "1.8.0",
+  "version": "2.0.0",
   "description": "Official OAS messaging integration for team-scoped aweb identities, mail, chat, and roster discovery.",
   "compatibility": {
-    "oas": ">=0.19.0"
+    "oas": ">=0.20.0"
   },
   "capabilities": [
     "capabilities/oas-aweb"
-  ]
+  ],
+  "configTemplates": {
+    "default": {
+      "path": "config-templates/default/oas-config.yaml",
+      "description": "Single-team deployment with aweb bound as the exclusive messaging layer for every soul.",
+      "default": true
+    }
+  }
 }

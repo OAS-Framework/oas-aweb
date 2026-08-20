@@ -1,13 +1,19 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { extractComments, parseKernelYaml } from "./lib/kernel-yaml.mjs";
 
 // Repo root holds dev tooling (scripts/, schemas/); the DISTRIBUTED package
 // payload lives in the `oas-package/` subtree. Manifests and their resources
 // are validated against the payload root; the containment boundary is the
 // payload root, never the repo root (contract: repo-only tooling is not
 // installed bytes and must never be reachable from a package resource path).
+//
+// The rules enforced here mirror the RELEASED @oas-framework/oas@0.20.0 engine
+// (lib/core.mjs: loadPackageManifest, isCanonicalTemplatePath,
+// assertCapabilitySelfContained). They exist so a contract break is caught in
+// this repo's own gate rather than at an adopter's `oas install`.
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const root = join(repoRoot, "oas-package");
 const errors = [];
@@ -17,62 +23,322 @@ const readJson = (path) => {
   catch (error) { report(relative(root, path), `invalid JSON (${error.message})`); return undefined; }
 };
 
-function validateSchema(value, schema, at) {
-  if (!schema || typeof schema !== "object") return;
-  if (schema.enum && !schema.enum.some((item) => Object.is(item, value))) report(at, `must be one of ${schema.enum.join(", ")}`);
+/** Minimal JSON-Schema evaluator covering the keywords our vendored schemas
+ * actually use. `collect` gathers errors instead of reporting them, so oneOf
+ * branches can be tried without polluting the real error list. */
+function checkSchema(value, schema, at, rootSchema, collect) {
+  const emit = collect || report;
+  if (schema === true || schema === undefined) return;
+  if (schema === false) { emit(at, "is not allowed here"); return; }
+  if (typeof schema !== "object") return;
+  if (schema.$ref) {
+    const target = schema.$ref.startsWith("#/$defs/") ? rootSchema?.$defs?.[schema.$ref.slice("#/$defs/".length)] : undefined;
+    if (target) checkSchema(value, target, at, rootSchema, collect);
+    return;
+  }
+  if (schema.allOf) for (const sub of schema.allOf) checkSchema(value, sub, at, rootSchema, collect);
+  if (schema.oneOf) {
+    const failures = schema.oneOf.map((sub) => { const bucket = []; checkSchema(value, sub, at, rootSchema, (p, m) => bucket.push(`${p}: ${m}`)); return bucket; });
+    if (!failures.some((bucket) => bucket.length === 0)) emit(at, `matches none of the allowed forms (${failures.flat().join("; ")})`);
+    return;
+  }
+  if ("const" in schema && !Object.is(value, schema.const)) emit(at, `must be ${JSON.stringify(schema.const)}`);
+  if (schema.enum && !schema.enum.some((item) => Object.is(item, value))) emit(at, `must be one of ${schema.enum.join(", ")}`);
   const actual = Array.isArray(value) ? "array" : value === null ? "null" : typeof value;
-  if (schema.type && actual !== schema.type) { report(at, `must be ${schema.type}, got ${actual}`); return; }
+  if (schema.type && actual !== schema.type) { emit(at, `must be ${schema.type}, got ${actual}`); return; }
   if (typeof value === "string") {
-    if (schema.minLength !== undefined && value.length < schema.minLength) report(at, `must contain at least ${schema.minLength} character(s)`);
-    if (schema.pattern && !(new RegExp(schema.pattern)).test(value)) report(at, `must match ${schema.pattern}`);
-    if (schema.not?.pattern && (new RegExp(schema.not.pattern)).test(value)) report(at, `must not match ${schema.not.pattern}`);
+    if (schema.minLength !== undefined && value.length < schema.minLength) emit(at, `must contain at least ${schema.minLength} character(s)`);
+    if (schema.pattern && !(new RegExp(schema.pattern)).test(value)) emit(at, `must match ${schema.pattern}`);
+    if (schema.not?.pattern && (new RegExp(schema.not.pattern)).test(value)) emit(at, `must not match ${schema.not.pattern}`);
   }
   if (Array.isArray(value)) {
-    if (schema.minItems !== undefined && value.length < schema.minItems) report(at, `must contain at least ${schema.minItems} item(s)`);
-    if (schema.uniqueItems && new Set(value.map((item) => JSON.stringify(item))).size !== value.length) report(at, "must contain unique items");
-    value.forEach((item, index) => validateSchema(item, schema.items, `${at}[${index}]`));
+    if (schema.minItems !== undefined && value.length < schema.minItems) emit(at, `must contain at least ${schema.minItems} item(s)`);
+    if (schema.uniqueItems && new Set(value.map((item) => JSON.stringify(item))).size !== value.length) emit(at, "must contain unique items");
+    value.forEach((item, index) => checkSchema(item, schema.items, `${at}[${index}]`, rootSchema, collect));
   }
   if (value && actual === "object") {
-    for (const key of schema.required || []) if (!(key in value)) report(at, `missing required property ${key}`);
+    // OWN properties only, everywhere. `"constructor" in {}` is true — as are
+    // toString, valueOf, hasOwnProperty and five more — so an `in` test against
+    // a schema's `properties` map dispatches an inherited FUNCTION as if it were
+    // a subschema, and `additionalProperties: false` never fires. A template
+    // carrying a root `constructor:` key would then pass this gate and be
+    // rejected only later, by the kernel, in the adopter's deployment.
+    for (const key of schema.required || []) if (!Object.hasOwn(value, key)) emit(at, `missing required property ${key}`);
     const properties = schema.properties || {};
     for (const [key, item] of Object.entries(value)) {
-      if (schema.propertyNames?.pattern && !(new RegExp(schema.propertyNames.pattern)).test(key)) report(`${at}.${key}`, `property name must match ${schema.propertyNames.pattern}`);
-      if (properties[key]) validateSchema(item, properties[key], `${at}.${key}`);
-      else if (schema.additionalProperties === false) report(`${at}.${key}`, "unknown property");
-      else if (schema.additionalProperties && typeof schema.additionalProperties === "object") validateSchema(item, schema.additionalProperties, `${at}.${key}`);
+      if (schema.propertyNames?.pattern && !(new RegExp(schema.propertyNames.pattern)).test(key)) emit(`${at}.${key}`, `property name must match ${schema.propertyNames.pattern}`);
+      if (Object.hasOwn(properties, key)) checkSchema(item, properties[key], `${at}.${key}`, rootSchema, collect);
+      else if (schema.additionalProperties === false) emit(`${at}.${key}`, "unknown property");
+      else if (schema.additionalProperties && typeof schema.additionalProperties === "object") checkSchema(item, schema.additionalProperties, `${at}.${key}`, rootSchema, collect);
     }
   }
 }
 
-function safeResource(base, candidate, at, kind = "path") {
-  if (typeof candidate !== "string" || !candidate.trim()) { report(at, `${kind} must be a non-empty string`); return; }
-  if (isAbsolute(candidate) || candidate.split(/[\\/]+/).includes("..")) { report(at, `${kind} must be package-relative and may not contain '..'`); return; }
+const validateSchema = (value, schema, at) => checkSchema(value, schema, at, schema, undefined);
+
+function safeResource(base, candidate, at, kind = "path", boundary = root) {
+  if (typeof candidate !== "string" || !candidate.trim()) { report(at, `${kind} must be a non-empty string`); return undefined; }
+  if (isAbsolute(candidate) || candidate.split(/[\\/]+/).includes("..")) { report(at, `${kind} must be package-relative and may not contain '..'`); return undefined; }
   const target = resolve(base, candidate);
-  if (!existsSync(target)) { report(at, `${kind} does not exist: ${candidate}`); return; }
-  const realRoot = realpathSync(root);
+  if (!existsSync(target)) { report(at, `${kind} does not exist: ${candidate}`); return undefined; }
+  const realBoundary = realpathSync(boundary);
   const realTarget = realpathSync(target);
-  if (realTarget !== realRoot && !realTarget.startsWith(realRoot + sep)) report(at, `${kind} escapes the package root after symlink resolution`);
+  if (realTarget !== realBoundary && !realTarget.startsWith(realBoundary + sep)) {
+    report(at, `${kind} escapes ${boundary === root ? "the package root" : "its capability root"} after symlink resolution`);
+    return undefined;
+  }
+  return realTarget;
+}
+
+/** Contract §2.5 (assertCapabilitySelfContained): a declared directory resource
+ * must not merely resolve inside the capability root — nothing UNDER it may
+ * escape either, or the materialized artifact is not independently hashable. */
+function assertContainedTree(dir, at, kind, capabilityRoot, visited = new Set()) {
+  const realRoot = realpathSync(capabilityRoot);
+  let realDir;
+  try { realDir = realpathSync(dir); } catch { report(at, `${kind} contains a broken symlink`); return; }
+  if (visited.has(realDir)) return;
+  visited.add(realDir);
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    let real;
+    try { real = realpathSync(path); }
+    catch { report(at, `${kind} contains a broken symlink: ${relative(capabilityRoot, path)}`); continue; }
+    if (real !== realRoot && !real.startsWith(realRoot + sep)) {
+      report(at, `${kind} contains a path escaping its capability root: ${relative(capabilityRoot, path)}`);
+      continue;
+    }
+    if (entry.isSymbolicLink()) { if (lstatSync(real).isDirectory()) assertContainedTree(real, at, kind, capabilityRoot, visited); }
+    else if (entry.isDirectory()) assertContainedTree(path, at, kind, capabilityRoot, visited);
+  }
+}
+
+/** Mirrors isCanonicalTemplatePath in the released kernel. */
+const CANONICAL_TEMPLATE_ROOT = "config-templates/";
+function isCanonicalTemplatePath(p) {
+  if (typeof p !== "string" || !p.startsWith(CANONICAL_TEMPLATE_ROOT)) return false;
+  const rest = p.slice(CANONICAL_TEMPLATE_ROOT.length);
+  if (!rest || rest.includes("\\")) return false;
+  return !rest.split("/").some((seg) => seg === "" || seg === "." || seg === "..");
+}
+
+// A distributed template is adopted VERBATIM into someone else's deployment, so
+// it must carry nothing local to ours. Enumerating a few known path roots was
+// not enough — /tmp, Windows and tilde-home forms all sailed through — so the
+// rule is now structural: a value that IS an absolute or home-relative path, in
+// any of the spellings a host might produce, is non-portable regardless of which
+// directory it names.
+
+/** A URL with a scheme is a portable reference — except `file:`, which is a
+ * machine path wearing a scheme. Handled separately and FIRST, because `file:`
+ * is legal with one slash (`file:/etc/x`) as well as three. */
+const FILE_SCHEME = /^file:/i;
+const URL_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
+
+/** Host environment references, wherever they appear inside a value. */
+const HOST_ENV = /\$\{?(HOME|USER|PWD)\b|%(USERPROFILE|HOMEPATH|USERNAME)%/i;
+
+/** Why this scalar cannot travel to another machine, or undefined if it can. */
+function nonPortableValue(value) {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  if (!text) return undefined;
+  if (FILE_SCHEME.test(text)) return "a file: URI naming a local path";
+  if (HOST_ENV.test(text)) return "a host environment path";
+  if (URL_SCHEME.test(text)) return undefined;           // ordinary URL: portable
+  if (/^~($|[/\\]|[A-Za-z0-9_.-]+)/.test(text)) return "a home-relative (~) path";
+  if (/^[A-Za-z]:[\\/]/.test(text)) return "a Windows drive-letter path";
+  if (/^\\\\[^\\]/.test(text)) return "a Windows UNC network path";
+  if (/^\\(?!\\)/.test(text)) return "a Windows root-relative path";
+  if (/^\//.test(text)) return "an absolute machine path";
+  return undefined;
+}
+
+/** A key that NAMES a secret. */
+const CREDENTIAL_KEY = /(^|[_-])(tokens?|secrets?|passwo?rds?|api[_-]?keys?|credentials?)($|[_-])/i;
+
+/** A secret being ASSIGNED, in free text: `api_key: sk-…`, `--api-key=sk-…`,
+ * `token=…`. Key-name checking alone misses both a credential smuggled inside
+ * an argument string and one sitting in a comment, and a template's comments
+ * are copied to the adopter as faithfully as its values. */
+const CREDENTIAL_ASSIGNMENT = /(^|[^\w])-{0,2}(tokens?|secrets?|passwo?rds?|api[_-]?keys?|credentials?)\s*[:=]/i;
+
+/** A COMPLETE URL span anywhere inside a scalar. Used to remove portable
+ * references before looking for local paths in what remains — the exemption
+ * belongs to the URL itself, not to the whole scalar because a URL happened to
+ * start it. `file:` spans are deliberately left in place: they ARE local paths.
+ */
+const URL_SPAN = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"']+/gi;
+function withoutPortableUrls(text) {
+  return String(text).replace(URL_SPAN, (span) => (/^file:/i.test(span) ? span : " ".repeat(span.length)));
+}
+
+/** Delimiters that can separate a path from surrounding text. `:` is NOT one —
+ * it belongs to a Windows drive letter — and `.` and `@` are not, so an
+ * scp-style git remote stays one token. */
+const TOKEN_SPLIT = /[\s"'`(){}\[\]<>,;|=&]+/;
+
+/** Why a local path appearing ANYWHERE in this scalar cannot travel.
+ *
+ * Deliberately no second set of "embedded" patterns: maintaining path forms
+ * twice is how the two drift, and they did — the embedded matchers required a
+ * trailing slash and a boundary character, so `--home=~alice`, `--home=~`,
+ * `cd /`, `use \` and `paths=[/etc/oas/x]` all passed while the very same
+ * strings were rejected as whole values. Instead the text is split into tokens
+ * and each is handed to nonPortableValue, so there is exactly ONE definition of
+ * every path form and a new embedding context cannot silently escape it. */
+function localPathIn(value) {
+  for (const token of withoutPortableUrls(value).split(TOKEN_SPLIT)) {
+    if (!token) continue;
+    for (const candidate of pathCandidates(token)) {
+      const reason = nonPortableValue(candidate);
+      if (reason) return reason;
+    }
+  }
+  return undefined;
+}
+
+/** A token, plus what follows each of its colons. `key:/tmp/x` embeds a path
+ * that no whitespace delimiter separates, so the colon has to be considered —
+ * but it cannot simply be a TOKEN_SPLIT delimiter, because a Windows drive
+ * letter needs its colon. A single-character prefix is therefore a drive and is
+ * left alone, and `file:` is a scheme nonPortableValue already classifies. A
+ * provider team id like `default:oas-framework.aweb.ai` yields a clean tail and
+ * stays legal. */
+/** An scp-style git remote: `user@host:path`. Its path is REMOTE — including
+ * when it is absolute, `git@example.com:/srv/git/repo.git` — so no colon tail
+ * may be taken from it. The `@` is what distinguishes it from `key:/local/path`. */
+const SCP_REMOTE = /^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+:/;
+
+function* pathCandidates(token) {
+  yield token;
+  if (SCP_REMOTE.test(token)) return;
+  for (let i = token.indexOf(":"); i !== -1; i = token.indexOf(":", i + 1)) {
+    const prefix = token.slice(0, i);
+    if (prefix.length > 1 && !/^file$/i.test(prefix)) yield token.slice(i + 1);
+  }
+}
+
+/** Markers that identify a PERSON or MACHINE. Applied ONLY to comment text:
+ * scalars get the stricter token scan in localPathIn above, and running these
+ * over the whole file would override its URL handling — the portable value
+ * https://docs.example.test/home/getting-started would be rejected as a user
+ * home directory. Comments stay deliberately narrow because they are PROSE: an
+ * illustrative "/etc/oas" in a sentence is documentation, while the same string
+ * in a value is configuration. Only a person/machine identity leaks here. */
+const IDENTIFYING_MARKERS = [
+  [/\/(Users|home)\/[^\s/"']+/, "a user home directory"],
+  [/[A-Za-z]:\\Users\\[^\s\\"']+/i, "a Windows user profile directory"],
+  [/(^|[\s"'(=])~\//m, "a home-relative (~) path"],
+  [/\$\{?HOME\b|%USERPROFILE%/i, "a host home reference"],
+  // A plausible URI path must follow the scheme, or ordinary prose trips it:
+  // "edit this file: before use" is not a file URI.
+  [/file:(\/\/|\/|[A-Za-z]:)/i, "a file: URI"],
+];
+
+/** Walk a parsed config, reporting non-portable values and credential leaks. */
+function checkPortability(node, at, path = []) {
+  if (Array.isArray(node)) {
+    node.forEach((item, index) => checkPortability(item, at, [...path, String(index)]));
+    return;
+  }
+  if (node && typeof node === "object") {
+    for (const [key, item] of Object.entries(node)) {
+      if (CREDENTIAL_KEY.test(key)) {
+        report(at, `config template is not portable — "${[...path, key].join(".")}" is a credential-shaped setting; templates are adopted verbatim into other people's deployments`);
+      }
+      checkPortability(item, at, [...path, key]);
+    }
+    return;
+  }
+  const where = path.join(".") || "(root)";
+  const reason = nonPortableValue(node);
+  if (reason) {
+    report(at, `config template is not portable — "${where}" is ${reason} (${JSON.stringify(node)}); templates are adopted verbatim into other people's deployments`);
+  } else if (typeof node === "string") {
+    // nonPortableValue only classifies a value that IS a path. One EMBEDDED in a
+    // larger scalar identifies its author just as well, so the string is
+    // tokenized — after complete non-file URL spans are removed — and every
+    // token is put through the SAME classifier. Removing URLs by SPAN rather
+    // than exempting the whole scalar is what makes
+    //   "https://example.test/guide --config=/Users/alice/private.yaml"
+    // fail while "open https://example.test/Users/guide" passes.
+    const embedded = localPathIn(node);
+    if (embedded) {
+      report(at, `config template is not portable — "${where}" embeds ${embedded} (${JSON.stringify(node)}); templates are adopted verbatim into other people's deployments`);
+    }
+  }
+  if (typeof node === "string" && CREDENTIAL_ASSIGNMENT.test(node)) {
+    report(at, `config template is not portable — "${where}" assigns a credential-shaped value; templates are adopted verbatim into other people's deployments`);
+  }
 }
 
 const packagePath = join(root, "oas-package.json");
-const packageSchemaPath = join(repoRoot, "schemas", "oas-package.schema.json");
-const capabilitySchemaPath = join(repoRoot, "schemas", "capability-manifest.schema.json");
 const packageManifest = readJson(packagePath);
-const packageSchema = readJson(packageSchemaPath);
-const capabilitySchema = readJson(capabilitySchemaPath);
+const packageSchema = readJson(join(repoRoot, "schemas", "oas-package.schema.json"));
+const capabilitySchema = readJson(join(repoRoot, "schemas", "capability-manifest.schema.json"));
+const configSchemaPath = join(repoRoot, "schemas", "oas-config.schema.json");
 
 if (packageManifest && packageSchema) validateSchema(packageManifest, packageSchema, "oas-package.json");
 
-const configs = packageManifest?.configs && typeof packageManifest.configs === "object" ? packageManifest.configs : {};
-const defaultConfigs = Object.entries(configs).filter(([, spec]) => spec?.default === true);
-if (defaultConfigs.length > 1) report("oas-package.json.configs", "at most one config profile may be marked default");
-for (const [name, spec] of Object.entries(configs)) {
-  if (spec?.path) safeResource(root, spec.path, `oas-package.json.configs.${name}.path`, "config profile");
+// ---------------------------------------------------------------- templates
+// `configTemplates` is the canonical 0.20 spelling; `configs` is read-only
+// compatibility for immutable 0.19 tags. Carrying both is an invalid manifest,
+// and NEW authoring (this package) must emit the canonical spelling only.
+const hasCanonical = packageManifest?.configTemplates !== undefined;
+const hasLegacy = packageManifest?.configs !== undefined;
+if (hasCanonical && hasLegacy) report("oas-package.json", 'declares both "configTemplates" and the deprecated "configs" spelling — use "configTemplates" only');
+if (hasLegacy && !hasCanonical) report("oas-package.json.configs", 'uses the DEPRECATED 0.19 spelling — newly authored packages must emit "configTemplates"');
+
+const templateKey = hasCanonical ? "configTemplates" : "configs";
+const rawTemplates = (hasCanonical ? packageManifest?.configTemplates : packageManifest?.configs) || {};
+const templates = typeof rawTemplates === "object" && !Array.isArray(rawTemplates) ? rawTemplates : {};
+const defaults = Object.entries(templates).filter(([, spec]) => spec?.default === true);
+if (defaults.length > 1) report(`oas-package.json.${templateKey}`, "at most one config template may be marked default");
+
+const configSchema = Object.keys(templates).length ? readJson(configSchemaPath) : undefined;
+for (const [name, spec] of Object.entries(templates)) {
+  const at = `oas-package.json.${templateKey}.${name}`;
+  if (!spec?.path) continue;
+  if (hasCanonical && !isCanonicalTemplatePath(spec.path)) {
+    report(`${at}.path`, `${JSON.stringify(spec.path)} must live under "${CANONICAL_TEMPLATE_ROOT}" with a contained file path (e.g. "${CANONICAL_TEMPLATE_ROOT}default/oas-config.yaml")`);
+    continue;
+  }
+  const real = safeResource(root, spec.path, `${at}.path`, "config template");
+  if (!real) continue;
+  if (!statSync(real).isFile()) { report(`${at}.path`, `config template is not a file: ${spec.path}`); continue; }
+  const source = readFileSync(real, "utf8");
+  // Parsed with the KERNEL's own semantics, so what is schema-checked here is
+  // what an adopter's deployment will actually see.
+  let parsed;
+  try { parsed = parseKernelYaml(source); }
+  catch (error) { report(at, `config template uses YAML the OAS config reader does not support: ${error.message}`); continue; }
+  // Comments are adopted verbatim too, so they are scanned as well — using the
+  // parser's own notion of what a comment is, which includes `key:# text`.
+  const comments = extractComments(source);
+  for (const [pattern, what] of IDENTIFYING_MARKERS) {
+    if (pattern.test(comments)) {
+      report(at, `config template is not portable — a comment mentions ${what}; comments are adopted verbatim into other people's deployments`);
+      break;
+    }
+  }
+  if (CREDENTIAL_ASSIGNMENT.test(comments)) {
+    report(at, `config template is not portable — a comment assigns a credential-shaped value; comments are adopted verbatim into other people's deployments`);
+  }
+  checkPortability(parsed, at);
+  if (configSchema) validateSchema(parsed, configSchema, `${spec.path}`);
 }
 
+// ------------------------------------------------------------- capabilities
 const declaredCapabilities = Array.isArray(packageManifest?.capabilities) ? packageManifest.capabilities : [];
 if (declaredCapabilities.length !== 1) {
   report("oas-package.json.capabilities", `official single-capability package must enumerate exactly one capability directory (found ${declaredCapabilities.length})`);
+}
+// A "." root is READ COMPATIBILITY for already-published packages. Authoring
+// never emits it, and the released kernel rejects it outright next to
+// `configTemplates`, so a materialized artifact stays self-contained.
+if (declaredCapabilities.includes(".")) {
+  report("oas-package.json.capabilities", 'the package root "." is not a valid capability root for a newly authored package — use a dedicated root such as "capabilities/<slug>" so the materialized artifact is self-contained');
 }
 
 const capabilities = [];
@@ -86,9 +352,23 @@ for (const [index, capabilityDir] of declaredCapabilities.entries()) {
   capabilities.push(manifest);
   if (capabilitySchema) validateSchema(manifest, capabilitySchema, `${capabilityDir}/oas.json`);
   const capabilityRoot = dirname(manifestPath);
-  for (const [resourceIndex, resource] of (manifest.skills || []).entries()) safeResource(capabilityRoot, resource, `${capabilityDir}/oas.json.skills[${resourceIndex}]`, "skill path");
-  if (manifest.inject) safeResource(capabilityRoot, manifest.inject, `${capabilityDir}/oas.json.inject`, "injection path");
-  for (const [agentIndex, agent] of (manifest.agents || []).entries()) safeResource(capabilityRoot, agent, `${capabilityDir}/oas.json.agents[${agentIndex}]`, "agent path");
+  // SELF-CONTAINMENT: every declared resource resolves inside the capability's
+  // OWN root, not merely inside the package. A capability reaching package-only
+  // paths cannot be materialized and is rejected rather than installed broken.
+  for (const [resourceIndex, resource] of (manifest.skills || []).entries()) {
+    const at = `${capabilityDir}/oas.json.skills[${resourceIndex}]`;
+    const real = safeResource(capabilityRoot, resource, at, "skill path", capabilityRoot);
+    if (real && statSync(real).isDirectory()) assertContainedTree(join(capabilityRoot, resource), at, "skill tree", capabilityRoot);
+  }
+  if (manifest.inject) safeResource(capabilityRoot, manifest.inject, `${capabilityDir}/oas.json.inject`, "injection path", capabilityRoot);
+  for (const [agentIndex, agent] of (manifest.agents || []).entries()) {
+    const at = `${capabilityDir}/oas.json.agents[${agentIndex}]`;
+    const real = safeResource(capabilityRoot, agent, at, "agent path", capabilityRoot);
+    if (real) {
+      if (!statSync(real).isDirectory()) report(at, "capability-defined agent is not a directory");
+      else assertContainedTree(join(capabilityRoot, agent), at, "capability-defined agent", capabilityRoot);
+    }
+  }
   // A hook may be a plain "entrypoint args" string or the object form
   // { command, required } (only the spawn hook may set required). Commands are
   // always strings. Reduce either to the executable entrypoint for containment.
@@ -96,9 +376,9 @@ for (const [index, capabilityDir] of declaredCapabilities.entries()) {
     const command = typeof spec === "string" ? spec : (spec && typeof spec === "object" ? spec.command : undefined);
     return typeof command === "string" ? command.trim().split(/\s+/)[0] : command;
   };
-  for (const [name, command] of Object.entries(manifest.commands || {})) safeResource(capabilityRoot, entrypoint(command), `${capabilityDir}/oas.json.commands.${name}`, "command entrypoint");
-  for (const [event, hook] of Object.entries(manifest.hooks || {})) safeResource(capabilityRoot, entrypoint(hook), `${capabilityDir}/oas.json.hooks.${event}`, "hook entrypoint");
-  for (const forbidden of ["global", "agent-types", "souls"]) if (forbidden in manifest) report(`${capabilityDir}/oas.json.${forbidden}`, "deployment targeting belongs to config, not a capability manifest");
+  for (const [name, command] of Object.entries(manifest.commands || {})) safeResource(capabilityRoot, entrypoint(command), `${capabilityDir}/oas.json.commands.${name}`, "command entrypoint", capabilityRoot);
+  for (const [event, hook] of Object.entries(manifest.hooks || {})) safeResource(capabilityRoot, entrypoint(hook), `${capabilityDir}/oas.json.hooks.${event}`, "hook entrypoint", capabilityRoot);
+  for (const forbidden of ["global", "agent-types", "souls"]) if (Object.hasOwn(manifest, forbidden)) report(`${capabilityDir}/oas.json.${forbidden}`, "deployment targeting belongs to config, not a capability manifest");
 }
 
 if (capabilities.length === 1 && packageManifest) {
@@ -119,4 +399,4 @@ if (errors.length) {
   process.stderr.write(`Manifest validation failed:\n- ${errors.join("\n- ")}\n`);
   process.exit(1);
 }
-process.stdout.write(`Validated ${relative(process.cwd(), packagePath) || "oas-package.json"} and ${capabilities.length} capability manifest(s).\n`);
+process.stdout.write(`Validated ${relative(process.cwd(), packagePath) || "oas-package.json"}, ${capabilities.length} capability manifest(s), and ${Object.keys(templates).length} config template(s).\n`);

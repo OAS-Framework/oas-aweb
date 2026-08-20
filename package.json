@@ -1,13 +1,14 @@
 {
   "name": "@oas-framework/oas-aweb",
-  "version": "1.8.0",
+  "version": "2.0.0",
   "description": "Official OAS messaging integration for team-scoped aweb identities, mail, chat, and roster discovery.",
   "license": "MIT",
   "type": "module",
   "private": true,
   "scripts": {
     "validate": "node scripts/validate-manifests.mjs",
-    "test": "npm run validate && node --test"
+    "probe": "node scripts/consumer-probe.mjs",
+    "test": "npm run validate && node --test test/config-template.test.mjs test/kernel-yaml.test.mjs test/manifest-validation.test.mjs test/oas-aweb.test.mjs test/test-runner.test.mjs"
   },
   "repository": {
     "type": "git",

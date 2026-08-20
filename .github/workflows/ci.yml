@@ -16,7 +16,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Validate manifests, vendored skills, and hooks
+      - name: Validate manifests, config template, vendored skills, and hooks
         run: npm test
-      - name: Consumer probe status
-        run: echo "PENDING(released-0.19.0-fixtures; package-runtime-api.md Consumer fixture) acquire -> lock -> trust -> activate -> spawn"
+
+  consumer-probe:
+    # Drives the RELEASED kernel at this package's declared compatibility floor
+    # against the payload, in a throwaway sandbox: acquire -> materialize ->
+    # lock -> ignore -> exact restore -> trust -> adopt -> requirements ->
+    # spawn/retire. It needs the npm registry, so it is its own job.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Consumer probe against the released OAS kernel
+        run: npm run probe
