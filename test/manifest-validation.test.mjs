@@ -366,3 +366,48 @@ test("the word credential in ordinary prose is not a leak", (t) => {
   });
   assert.equal(result.status, 0, result.stderr);
 });
+
+// A comment-only VALUE needs no space before the `#` — `key:# text` is how the
+// kernel opens a block there — so an extractor that only looked for `\s+#`
+// tails left a hiding place inside an otherwise schema-valid template.
+const LAYERS = "  layers:\n    messaging:\n      capability: test.capability-1\n      from: installed\n      global: true\n";
+for (const [label, body] of [
+  ["a credential", "# api_key: sk-live-leaked"],
+  ["a machine path", "#/Users/alice/secret.yaml"],
+]) {
+  test(`validator rejects ${label} hidden in a comment-only value`, (t) => {
+    const result = runFixture(t, {
+      manifestExtras: { configTemplates: { default: { path: "config-templates/default/oas-config.yaml" } } },
+      files: { "config-templates/default/oas-config.yaml": `name: fixture-deployment\nteam:\n  name: my-team\ncapabilities:${body}\n${LAYERS}` },
+    });
+    assert.equal(result.status, 1, `${label} in a comment-only value must not reach an adopter`);
+    assert.match(result.stderr, /not portable/);
+  });
+}
+
+// nonPortableValue only classifies a value that IS a path; one EMBEDDED in a
+// larger scalar identifies its author just as well.
+for (const [label, value] of [
+  ["a POSIX home path inside an argument string", "launch --config=/Users/alice/private.yaml"],
+  ["a tilde path inside an argument string", "launch --config=~/private.yaml"],
+  ["a file: URI inside a larger string", "read file:/etc/oas/instructions.md first"],
+]) {
+  test(`validator rejects ${label}`, (t) => {
+    const result = runFixture(t, {
+      manifestExtras: { configTemplates: { default: { path: "config-templates/default/oas-config.yaml" } } },
+      files: { "config-templates/default/oas-config.yaml": `${PORTABLE_TEMPLATE}agents-md-injection: "${value}"\n` },
+    });
+    assert.equal(result.status, 1, `${label} must be caught`);
+    assert.match(result.stderr, /not portable/);
+  });
+}
+
+test("prose mentioning a file: in a comment is not a file URI", (t) => {
+  // Requiring a plausible URI path after the scheme is what separates
+  // "edit this file: before use" from "file:/etc/oas/x".
+  const result = runFixture(t, {
+    manifestExtras: { configTemplates: { default: { path: "config-templates/default/oas-config.yaml" } } },
+    files: { "config-templates/default/oas-config.yaml": PORTABLE_TEMPLATE.replace("name: fixture-deployment", "name: fixture-deployment # edit this file: before use") },
+  });
+  assert.equal(result.status, 0, result.stderr);
+});

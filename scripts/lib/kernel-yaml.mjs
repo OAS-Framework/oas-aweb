@@ -94,6 +94,38 @@ function unsupported(value) {
 function fail(line, message) { throw new Error(`line ${line}: ${message}`); }
 
 /**
+ * The comment text of a config, decided by the PARSER'S OWN branches so the two
+ * cannot drift. Three shapes count as comment, and missing any one of them
+ * hands a hiding place to whatever scans this text:
+ *
+ *   # whole line
+ *   key: value  # tail          (needs whitespace before the #)
+ *   key:# text                  (a comment-only VALUE — no space required,
+ *                                because `rawVal.trim().startsWith("#")` is
+ *                                how the kernel opens a block here)
+ *
+ * Quoted `#` is deliberately not exempt: the kernel does not exempt it, so what
+ * it treats as a comment is what this returns.
+ *
+ * @param {string} source
+ * @returns {string} the comment text, one fragment per line
+ */
+export function extractComments(source) {
+  const parts = [];
+  for (const raw of String(source).split(/\r?\n/)) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith("#")) { parts.push(trimmed); continue; }
+    const match = KEY_LINE.exec(raw);
+    const value = match ? match[3] : raw;
+    if (value.trim().startsWith("#")) { parts.push(value.trim()); continue; }
+    const inline = /\s+#.*$/.exec(value);
+    if (inline) parts.push(inline[0].trim());
+  }
+  return parts.join("\n");
+}
+
+/**
  * @param {string} source oas-config.yaml text
  * @returns {object} exactly what the kernel's parseYamlNested would return
  * @throws {Error} on any construct the kernel would silently drop or reinterpret

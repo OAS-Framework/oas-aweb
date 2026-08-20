@@ -2,7 +2,7 @@
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseKernelYaml } from "./lib/kernel-yaml.mjs";
+import { extractComments, parseKernelYaml } from "./lib/kernel-yaml.mjs";
 
 // Repo root holds dev tooling (scripts/, schemas/); the DISTRIBUTED package
 // payload lives in the `oas-package/` subtree. Manifests and their resources
@@ -173,24 +173,10 @@ const IDENTIFYING_MARKERS = [
   [/[A-Za-z]:\\Users\\[^\s\\"']+/i, "a Windows user profile directory"],
   [/(^|[\s"'(=])~\//m, "a home-relative (~) path"],
   [/\$\{?HOME\b|%USERPROFILE%/i, "a host home reference"],
-  [/file:/i, "a file: URI"],
+  // A plausible URI path must follow the scheme, or ordinary prose trips it:
+  // "edit this file: before use" is not a file URI.
+  [/file:(\/\/|\/|[A-Za-z]:)/i, "a file: URI"],
 ];
-
-/** The comment text of a config, using the KERNEL's comment semantics: a line
- * whose first non-space character is `#`, and the `\s+#…` tail of any other
- * line. Quoted `#` is deliberately NOT exempt — the kernel does not exempt it
- * either, so what it treats as a comment is what we scan. */
-function commentText(source) {
-  const parts = [];
-  for (const raw of String(source).split(/\r?\n/)) {
-    const trimmed = raw.trim();
-    if (!trimmed) continue;
-    if (trimmed.startsWith("#")) { parts.push(trimmed); continue; }
-    const inline = /\s+#.*$/.exec(raw);
-    if (inline) parts.push(inline[0].trim());
-  }
-  return parts.join("\n");
-}
 
 /** Walk a parsed config, reporting non-portable values and credential leaks. */
 function checkPortability(node, at, path = []) {
@@ -211,6 +197,18 @@ function checkPortability(node, at, path = []) {
   const reason = nonPortableValue(node);
   if (reason) {
     report(at, `config template is not portable — "${where}" is ${reason} (${JSON.stringify(node)}); templates are adopted verbatim into other people's deployments`);
+  } else if (typeof node === "string" && !URL_SCHEME.test(node.trim())) {
+    // nonPortableValue only classifies a value that IS a path. A machine path
+    // EMBEDDED in a larger scalar — `launch --config=/Users/alice/private.yaml`
+    // — identifies its author just as well, so the same markers used on comments
+    // apply here. An ordinary URL keeps its exemption: whatever its path spells,
+    // it is not a local path.
+    for (const [pattern, what] of IDENTIFYING_MARKERS) {
+      if (pattern.test(node)) {
+        report(at, `config template is not portable — "${where}" embeds ${what} (${JSON.stringify(node)}); templates are adopted verbatim into other people's deployments`);
+        break;
+      }
+    }
   }
   if (typeof node === "string" && CREDENTIAL_ASSIGNMENT.test(node)) {
     report(at, `config template is not portable — "${where}" assigns a credential-shaped value; templates are adopted verbatim into other people's deployments`);
@@ -252,9 +250,14 @@ for (const [name, spec] of Object.entries(templates)) {
   if (!real) continue;
   if (!statSync(real).isFile()) { report(`${at}.path`, `config template is not a file: ${spec.path}`); continue; }
   const source = readFileSync(real, "utf8");
-  // Comments are adopted verbatim too, so they are scanned — but only they. A
-  // value is classified structurally below, where URLs are correctly exempt.
-  const comments = commentText(source);
+  // Parsed with the KERNEL's own semantics, so what is schema-checked here is
+  // what an adopter's deployment will actually see.
+  let parsed;
+  try { parsed = parseKernelYaml(source); }
+  catch (error) { report(at, `config template uses YAML the OAS config reader does not support: ${error.message}`); continue; }
+  // Comments are adopted verbatim too, so they are scanned as well — using the
+  // parser's own notion of what a comment is, which includes `key:# text`.
+  const comments = extractComments(source);
   for (const [pattern, what] of IDENTIFYING_MARKERS) {
     if (pattern.test(comments)) {
       report(at, `config template is not portable — a comment mentions ${what}; comments are adopted verbatim into other people's deployments`);
@@ -264,11 +267,6 @@ for (const [name, spec] of Object.entries(templates)) {
   if (CREDENTIAL_ASSIGNMENT.test(comments)) {
     report(at, `config template is not portable — a comment assigns a credential-shaped value; comments are adopted verbatim into other people's deployments`);
   }
-  // Parsed with the KERNEL's own semantics, so what is schema-checked here is
-  // what an adopter's deployment will actually see.
-  let parsed;
-  try { parsed = parseKernelYaml(source); }
-  catch (error) { report(at, `config template uses YAML the OAS config reader does not support: ${error.message}`); continue; }
   checkPortability(parsed, at);
   if (configSchema) validateSchema(parsed, configSchema, `${spec.path}`);
 }

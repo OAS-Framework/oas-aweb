@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseKernelYaml } from "../scripts/lib/kernel-yaml.mjs";
+import { extractComments, parseKernelYaml } from "../scripts/lib/kernel-yaml.mjs";
 
 // The gate validates the shipped config template against the config schema with
 // this parser, so it must agree with the kernel's reader on everything it
@@ -98,4 +98,27 @@ test("keys that merely look dangerous become ordinary OWN properties", () => {
   assert.deepEqual(Object.keys(parsed), ["constructor", "prototype"], "visible to any own-property walk");
   assert.equal(parsed.constructor, "a");
   assert.deepEqual(parseKernelYaml("a: -3"), { a: -3 }, "a negative scalar is not a sequence item");
+});
+
+test("extractComments covers every shape the parser treats as a comment", () => {
+  // Whole line, inline tail, AND a comment-only value with no space before the
+  // `#` — the parser opens a block on `rawVal.trim().startsWith("#")`, so a
+  // scanner that only knew about `\s+#` tails had a blind spot.
+  const comments = extractComments([
+    "# whole line",
+    "name: value  # inline tail",
+    "capabilities:# comment-only value",
+    "team:",
+    "  name: my-team",
+  ].join("\n"));
+  assert.match(comments, /# whole line/);
+  assert.match(comments, /# inline tail/);
+  assert.match(comments, /# comment-only value/);
+  assert.doesNotMatch(comments, /my-team/, "values are not comments");
+});
+
+test("extractComments treats a quoted # as the parser does", () => {
+  // The parser does not exempt quotes, so neither may the scanner — otherwise
+  // the two disagree about where a comment begins.
+  assert.match(extractComments('name: "a # b"'), /# b/);
 });
