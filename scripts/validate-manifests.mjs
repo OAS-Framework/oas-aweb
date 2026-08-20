@@ -129,8 +129,10 @@ function isCanonicalTemplatePath(p) {
 // any of the spellings a host might produce, is non-portable regardless of which
 // directory it names.
 
-/** A URL with a scheme is a portable reference, not a machine path — except
- * `file:`, which is exactly a machine path wearing a scheme. */
+/** A URL with a scheme is a portable reference — except `file:`, which is a
+ * machine path wearing a scheme. Handled separately and FIRST, because `file:`
+ * is legal with one slash (`file:/etc/x`) as well as three. */
+const FILE_SCHEME = /^file:/i;
 const URL_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
 
 /** Host environment references, wherever they appear inside a value. */
@@ -141,7 +143,7 @@ function nonPortableValue(value) {
   if (typeof value !== "string") return undefined;
   const text = value.trim();
   if (!text) return undefined;
-  if (/^file:\/\//i.test(text)) return "a file:// URL naming a local path";
+  if (FILE_SCHEME.test(text)) return "a file: URI naming a local path";
   if (HOST_ENV.test(text)) return "a host environment path";
   if (URL_SCHEME.test(text)) return undefined;           // ordinary URL: portable
   if (/^~($|[/\\]|[A-Za-z0-9_.-]+)/.test(text)) return "a home-relative (~) path";
@@ -152,23 +154,45 @@ function nonPortableValue(value) {
   return undefined;
 }
 
-/** Keys that name a secret. A template is source material an adopter reads and
- * commits; a credential must never be one of the things they inherit. */
+/** A key that NAMES a secret. */
 const CREDENTIAL_KEY = /(^|[_-])(tokens?|secrets?|passwo?rds?|api[_-]?keys?|credentials?)($|[_-])/i;
 
-/** Markers that identify a PERSON or MACHINE. Checked against the raw file,
- * comments included, because comments are adopted verbatim too — a leaked
- * username in a comment travels just as far as one in a value. Deliberately
- * narrow, so an illustrative "/path/to/scope" in prose is not flagged. */
+/** A secret being ASSIGNED, in free text: `api_key: sk-…`, `--api-key=sk-…`,
+ * `token=…`. Key-name checking alone misses both a credential smuggled inside
+ * an argument string and one sitting in a comment, and a template's comments
+ * are copied to the adopter as faithfully as its values. */
+const CREDENTIAL_ASSIGNMENT = /(^|[^\w])-{0,2}(tokens?|secrets?|passwo?rds?|api[_-]?keys?|credentials?)\s*[:=]/i;
+
+/** Markers that identify a PERSON or MACHINE. Applied ONLY to comment text:
+ * scalars are classified structurally by nonPortableValue, which exempts URLs,
+ * and running these over the whole file would override that exemption — the
+ * portable value https://docs.example.test/home/getting-started would be
+ * rejected as a user home directory. */
 const IDENTIFYING_MARKERS = [
   [/\/(Users|home)\/[^\s/"']+/, "a user home directory"],
   [/[A-Za-z]:\\Users\\[^\s\\"']+/i, "a Windows user profile directory"],
   [/(^|[\s"'(=])~\//m, "a home-relative (~) path"],
   [/\$\{?HOME\b|%USERPROFILE%/i, "a host home reference"],
-  [/file:\/\//i, "a file:// URL"],
+  [/file:/i, "a file: URI"],
 ];
 
-/** Walk a parsed config, reporting non-portable values and credential keys. */
+/** The comment text of a config, using the KERNEL's comment semantics: a line
+ * whose first non-space character is `#`, and the `\s+#…` tail of any other
+ * line. Quoted `#` is deliberately NOT exempt — the kernel does not exempt it
+ * either, so what it treats as a comment is what we scan. */
+function commentText(source) {
+  const parts = [];
+  for (const raw of String(source).split(/\r?\n/)) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith("#")) { parts.push(trimmed); continue; }
+    const inline = /\s+#.*$/.exec(raw);
+    if (inline) parts.push(inline[0].trim());
+  }
+  return parts.join("\n");
+}
+
+/** Walk a parsed config, reporting non-portable values and credential leaks. */
 function checkPortability(node, at, path = []) {
   if (Array.isArray(node)) {
     node.forEach((item, index) => checkPortability(item, at, [...path, String(index)]));
@@ -176,17 +200,20 @@ function checkPortability(node, at, path = []) {
   }
   if (node && typeof node === "object") {
     for (const [key, item] of Object.entries(node)) {
-      const where = [...path, key].join(".");
       if (CREDENTIAL_KEY.test(key)) {
-        report(at, `config template is not portable — "${where}" is a credential-shaped setting; templates are adopted verbatim into other people's deployments`);
+        report(at, `config template is not portable — "${[...path, key].join(".")}" is a credential-shaped setting; templates are adopted verbatim into other people's deployments`);
       }
       checkPortability(item, at, [...path, key]);
     }
     return;
   }
+  const where = path.join(".") || "(root)";
   const reason = nonPortableValue(node);
   if (reason) {
-    report(at, `config template is not portable — "${path.join(".")}" is ${reason} (${JSON.stringify(node)}); templates are adopted verbatim into other people's deployments`);
+    report(at, `config template is not portable — "${where}" is ${reason} (${JSON.stringify(node)}); templates are adopted verbatim into other people's deployments`);
+  }
+  if (typeof node === "string" && CREDENTIAL_ASSIGNMENT.test(node)) {
+    report(at, `config template is not portable — "${where}" assigns a credential-shaped value; templates are adopted verbatim into other people's deployments`);
   }
 }
 
@@ -225,11 +252,17 @@ for (const [name, spec] of Object.entries(templates)) {
   if (!real) continue;
   if (!statSync(real).isFile()) { report(`${at}.path`, `config template is not a file: ${spec.path}`); continue; }
   const source = readFileSync(real, "utf8");
+  // Comments are adopted verbatim too, so they are scanned — but only they. A
+  // value is classified structurally below, where URLs are correctly exempt.
+  const comments = commentText(source);
   for (const [pattern, what] of IDENTIFYING_MARKERS) {
-    if (pattern.test(source)) {
-      report(at, `config template is not portable — it mentions ${what}; templates (comments included) are adopted verbatim into other people's deployments`);
+    if (pattern.test(comments)) {
+      report(at, `config template is not portable — a comment mentions ${what}; comments are adopted verbatim into other people's deployments`);
       break;
     }
+  }
+  if (CREDENTIAL_ASSIGNMENT.test(comments)) {
+    report(at, `config template is not portable — a comment assigns a credential-shaped value; comments are adopted verbatim into other people's deployments`);
   }
   // Parsed with the KERNEL's own semantics, so what is schema-checked here is
   // what an adopter's deployment will actually see.

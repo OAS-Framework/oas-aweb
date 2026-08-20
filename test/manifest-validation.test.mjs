@@ -186,6 +186,9 @@ for (const [label, value] of [
   ["a ${HOME} reference", "${HOME}/instructions.md"],
   ["a %USERPROFILE% reference", "%USERPROFILE%\\instructions.md"],
   ["a file:// URL", "file:///Users/me/instructions.md"],
+  // `file:` is legal with ONE slash too, so matching "file://" missed it.
+  ["a single-slash file: URI", "file:/etc/oas/instructions.md"],
+  ["a file: URI with a drive letter", "file:///C:/Users/me/instructions.md"],
 ]) {
   test(`validator rejects a template value that is ${label}`, (t) => {
     const result = runFixture(t, {
@@ -206,6 +209,11 @@ for (const [label, value] of [
   ["a scope-relative path", ".agents/injections/aweb.md"],
   ["a bare relative path", "injections/aweb.md"],
   ["the literal none", "none"],
+  // Scalars are classified structurally, so a URL stays portable no matter what
+  // its PATH spells. Scanning the whole file for home-directory markers used to
+  // override that and reject these.
+  ["an https URL whose path contains /home/", "https://docs.example.test/home/getting-started"],
+  ["an https URL whose path contains /Users/", "https://example.test/Users/guide"],
 ]) {
   test(`validator accepts ${label}, which is portable`, (t) => {
     const result = runFixture(t, {
@@ -329,4 +337,32 @@ test("validator still reports a genuinely missing required property", (t) => {
   });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /missing required property capability/);
+});
+
+// A credential can hide in three places, and checking only key NAMES catches
+// just one of them. All three are copied to the adopter verbatim.
+for (const [label, template] of [
+  ["a value", `${PORTABLE_TEMPLATE}agents-md-injection: "--api-key=sk-live-leaked"\n`],
+  ["a whole-line comment", `# api_key: sk-live-leaked\n${PORTABLE_TEMPLATE}`],
+  ["an inline comment", PORTABLE_TEMPLATE.replace("name: fixture-deployment", "name: fixture-deployment # token: sk-live-leaked")],
+]) {
+  test(`validator rejects a credential assigned in ${label}`, (t) => {
+    const result = runFixture(t, {
+      manifestExtras: { configTemplates: { default: { path: "config-templates/default/oas-config.yaml" } } },
+      files: { "config-templates/default/oas-config.yaml": template },
+    });
+    assert.equal(result.status, 1, `a credential in ${label} must not reach an adopter`);
+    assert.match(result.stderr, /credential-shaped value/);
+  });
+}
+
+test("the word credential in ordinary prose is not a leak", (t) => {
+  // The shipped template's own comment says "no credential, account, machine
+  // path" — a rule that flagged the word rather than an assignment would make
+  // the template unable to document its own portability promise.
+  const result = runFixture(t, {
+    manifestExtras: { configTemplates: { default: { path: "config-templates/default/oas-config.yaml" } } },
+    files: { "config-templates/default/oas-config.yaml": `# no credential, account, or machine path\n${PORTABLE_TEMPLATE}` },
+  });
+  assert.equal(result.status, 0, result.stderr);
 });
