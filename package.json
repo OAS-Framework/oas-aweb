@@ -8,7 +8,7 @@
   "scripts": {
     "validate": "node scripts/validate-manifests.mjs",
     "probe": "node scripts/consumer-probe.mjs",
-    "test": "npm run validate && node --test"
+    "test": "npm run validate && node --test test/config-template.test.mjs test/kernel-yaml.test.mjs test/manifest-validation.test.mjs test/oas-aweb.test.mjs test/test-runner.test.mjs"
   },
   "repository": {
     "type": "git",
