@@ -140,19 +140,29 @@ check(`kernel under test is the declared floor ${KERNEL_VERSION}`, () => {
   assert(oas(["version"]).stdout.includes(KERNEL_VERSION), `kernel is not ${KERNEL_VERSION}`);
 });
 
-check("the probe PATH controls every executable the kernel may resolve", () => {
-  // The absent DIRECTION must be a property of this construction, not of the
-  // machine. On a host shipping /usr/bin/pi the fails-closed checks below would
-  // otherwise exercise the real runtime and pass for the wrong reason — the
-  // same class of accident as `aw` living beside `node` in nvm layouts.
-  for (const bin of CONTROLLED) {
-    const found = spawnSync("sh", ["-c", `command -v ${bin}`], { env: { PATH: BASE_PATH }, encoding: "utf8" }).stdout.trim();
-    equal(found, "", `${bin} must not be reachable from the probe PATH (found ${found})`);
-  }
+// PREFLIGHT — fatal, and deliberately OUTSIDE check(). check() records a failure
+// and carries on, which is right for a finding but wrong for a broken sandbox:
+// continuing would let every later fails-closed and spawn assertion resolve the
+// REAL binary and pass for the wrong reason. Every controlled executable is
+// inspected (not just up to the first hit) and the run aborts if any is
+// reachable.
+{
+  const reachable = CONTROLLED
+    .map((bin) => [bin, spawnSync("sh", ["-c", `command -v ${bin}`], { env: { PATH: BASE_PATH }, encoding: "utf8" }).stdout.trim()])
+    .filter(([, found]) => found);
   const node = spawnSync("sh", ["-c", "command -v node"], { env: { PATH: BASE_PATH }, encoding: "utf8" }).stdout.trim();
-  assert(node, "node must stay reachable");
-  equal(process.env.HOME === HOME, false, "HOME is replaced per invocation, not inherited");
-});
+  const problems = [
+    ...reachable.map(([bin, found]) => `  ${bin} is reachable from the probe PATH at ${found}`),
+    ...(node ? [] : ["  node is NOT reachable from the probe PATH"]),
+    ...(process.env.HOME === HOME ? ["  HOME was inherited rather than replaced"] : []),
+  ];
+  if (problems.length) {
+    console.error(`PROBE ABORTED — the sandbox does not control what the kernel resolves:\n${problems.join("\n")}\n` +
+      `Every verdict below would depend on this host rather than on the package.`);
+    process.exit(1);
+  }
+}
+results.push(`  ok   the probe PATH controls every executable the kernel may resolve (${CONTROLLED.join(", ")})`);
 
 // ======================================================= config-reader parity
 // The repo gate schema-checks the shipped template with scripts/lib/kernel-yaml.mjs.
@@ -498,23 +508,40 @@ shim(FAKE_BIN, "pi", `if [ "$1" = "list" ]; then printf '  npm:@awebai/pi\\n    
 shim(FAKE_BIN, "tmux", `case "$1" in
   kill-window|has-session|list-windows|list-sessions) exit 0 ;;
 esac`);
+// Each handled call exits 0 HERE; anything unmatched falls through to the
+// shared recorder in shim(), so no branch can silently swallow a call the probe
+// never planned for.
 shim(FAKE_BIN, "aw", `echo "$@" >> ${AW_STATE}
 case "$1 $2" in
-  "team list") printf '{"active_team":"${TEAM}","memberships":[{"team_id":"${TEAM}"}]}\\n' ;;
-  "team invite") printf '{"token":"probe-invite-token"}\\n' ;;
-  "team join") printf '{"alias":"%s","team_id":"${TEAM}"}\\n' "$5" ;;
-  "init "*|"init") mkdir -p .aw ;;
-  "workspace delete") : ;;
-  *) exit 91 ;;
-esac
-exit 0`);
+  "team list") printf '{"active_team":"${TEAM}","memberships":[{"team_id":"${TEAM}"}]}\\n'; exit 0 ;;
+  "team invite") printf '{"token":"probe-invite-token"}\\n'; exit 0 ;;
+  "team join") printf '{"alias":"%s","team_id":"${TEAM}"}\\n' "$5"; exit 0 ;;
+  "init "*|"init") mkdir -p .aw; exit 0 ;;
+  "workspace delete") exit 0 ;;
+esac`);
 const FAKE_PATH = `${FAKE_BIN}:${BASE_PATH}`;
+
+check("every stub refuses and records a call the probe did not plan for", () => {
+  // Runs before the stubs are used in anger, and resets the marker afterwards.
+  // Without this, a stub whose allowed branch swallowed the fall-through would
+  // look identical to one that was simply never called wrongly — which is how
+  // the aw catch-all and the pi-only stub previously hid unplanned calls.
+  for (const bin of ["aw", "pi", "tmux"]) {
+    const run = spawnSync(join(FAKE_BIN, bin), ["unplanned-subcommand"], { encoding: "utf8", env: { PATH: BASE_PATH, HOME } });
+    assert(run.status !== 0, `${bin} stub must fail an unplanned call, got exit ${run.status}`);
+  }
+  const recorded = existsSync(UNEXPECTED) ? readFileSync(UNEXPECTED, "utf8") : "";
+  for (const bin of ["aw", "pi", "tmux"]) {
+    assert(recorded.includes(`${bin}: unplanned-subcommand`), `${bin} stub must RECORD the unplanned call, log was:\n${recorded}`);
+  }
+  rmSync(UNEXPECTED, { force: true });
+});
 mkdirSync(join(adopted, ".aw"), { recursive: true });
 
 check("required spawn hook fails the spawn and rolls it back when aw is absent", () => {
   // pi is satisfied, aw is not: the identity cannot be minted, and an instance
   // that believes it is reachable by mail but is not must never start.
-  const piOnly = shim(join(sandbox, "pi-only"), "pi", `if [ "$1" = "list" ]; then printf '  npm:@awebai/pi\\n      ${PI_EXT}\\n'; exit 0; fi\nexit 0`);
+  const piOnly = shim(join(sandbox, "pi-only"), "pi", `if [ "$1" = "list" ]; then printf '  npm:@awebai/pi\\n      ${PI_EXT}\\n'; exit 0; fi`);
   const spawned = oasJson(["spawn", "probe-pi", "--purpose", "norequire", "--task", "probe", "--no-launch"],
     { cwd: adopted, path: `${dirname(piOnly)}:${BASE_PATH}`, expect: "fail" });
   equal(spawned.ok, false, "spawn must fail");

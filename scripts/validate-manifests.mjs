@@ -205,8 +205,14 @@ function localPathIn(value) {
  * left alone, and `file:` is a scheme nonPortableValue already classifies. A
  * provider team id like `default:oas-framework.aweb.ai` yields a clean tail and
  * stays legal. */
+/** An scp-style git remote: `user@host:path`. Its path is REMOTE — including
+ * when it is absolute, `git@example.com:/srv/git/repo.git` — so no colon tail
+ * may be taken from it. The `@` is what distinguishes it from `key:/local/path`. */
+const SCP_REMOTE = /^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+:/;
+
 function* pathCandidates(token) {
   yield token;
+  if (SCP_REMOTE.test(token)) return;
   for (let i = token.indexOf(":"); i !== -1; i = token.indexOf(":", i + 1)) {
     const prefix = token.slice(0, i);
     if (prefix.length > 1 && !/^file$/i.test(prefix)) yield token.slice(i + 1);

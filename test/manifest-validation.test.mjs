@@ -504,6 +504,9 @@ for (const [label, value] of [
   // A colon does not imply a path: a provider team id and an scp-style remote
   // both carry one, and a drive letter NEEDS its colon kept intact.
   ["a provider team id", "default:oas-framework.aweb.ai"],
+  // An scp remote's path is REMOTE even when absolute, so no colon tail may be
+  // taken from it. The other scp fixtures all use relative remote paths.
+  ["an scp remote with an absolute remote path", "git@example.com:/srv/git/repo.git"],
   ["prose containing a slash", "read and/or write"],
 ]) {
   test(`validator accepts ${label}`, (t) => {
